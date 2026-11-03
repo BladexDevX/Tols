@@ -1,0 +1,14 @@
+local ALLOW_LIST = {
+    -- luarmor / keys
+    "luarmor.net", "api.luarmor.net", "luarmor.xyz",
+    "zyox-api.zyoxkeys.workers.dev", "webproxy.squareweb.app",
+    
+    -- roblox / cdn
+    "roblox.com", "rbxcdn.com", "rbx.com", "robloxlua.com",
+    
+    -- cdn codigo
+    "jsdelivr.net", "unpkg.com", "githubusercontent.com", "github.com",
+    
+    -- google
+    "googleapis.com", "gstatic.com",
+}
