@@ -1,0 +1,225 @@
+--Luamor súperflow 
+-- utilidades de red
+local function safeHttpGet(url)
+    local ok, res = pcall(function() return game:HttpGet(url) end)
+    if ok and type(res) == "string" and #res > 0 then
+        if not res:sub(1, 50):lower():find("<!doctype") and not res:sub(1, 50):lower():find("<html") then
+            return res 
+        end
+    end
+    
+    local req = (syn and syn.request) or (http and http.request) or http_request or request
+    if req then
+        local reqOk, reqRes = pcall(req, {
+            Url = url,
+            Method = "GET",
+            Headers = { ["User-Agent"] = "Roblox/WinInet" }
+        })
+        if reqOk and type(reqRes) == "table" and reqRes.StatusCode == 200 and reqRes.Body then 
+            return reqRes.Body 
+        end
+    end
+    return nil, "HTTP Fetch Failed"
+end
+
+local function extractURL(input)
+    if type(input) ~= "string" then return nil end
+    input = input:match("^%s*(.-)%s*$")
+    if input == "" then return nil end
+    local u = input:match("^(https?://%S+)$"); if u then return u end
+    u = input:match("[Hh]ttp[Gg]et%s*%(?%s*[\"']([^\"']+)[\"']"); if u then return u end
+    u = input:match("[Hh]ttp[Gg]et%s*%(?%s*%[=*%[([^%]]+)%]=*%]"); if u then return u end
+    u = input:match("[Hh]ttp[Gg]et[Aa]sync%s*%(?%s*[\"']([^\"']+)[\"']"); if u then return u end
+    u = input:match("[Uu]rl%s*=%s*[\"']([^\"']+)[\"']"); if u then return u end
+    u = input:match("(https?://[^%s\"'%)%]]+)"); if u then return u end
+    return nil
+end
+
+-- funcion principal
+local function execV1(input)
+    task.spawn(function()
+        local okTop, errTop = pcall(function()
+            local url = extractURL(input)
+            local parsedHost = url and (url:match("^%a+://([^/%?#:]+)") or "desconocido") or "desconocido"
+            parsedHost = parsedHost:lower()
+
+            -- deteccion temprana por link
+            if parsedHost:find("luarmor") or parsedHost:find("superflow") then
+                print("Luamor superflow detectado")
+            end
+
+            local DIR            = EXTRACT_DIR .. "/" .. parsedHost
+            local BYPASS_LOADER  = true
+            local GRACE          = 20
+            local LOADER_URL     = url
+
+            pcall(makefolder, DIR)
+            
+            local function pathFor(n) return DIR .. "/layer_" .. n .. ".lua" end
+
+            local LUA_TOKENS = { "function", "local ", "return", "end ", "pcall" }
+            
+            local layers, lsDepth = 0, 0
+            local bypassUntil = 0
+
+            local function hookfn(tbl, name, factory)
+                if not tbl then return false end
+                local f = tbl[name]
+                if type(f) ~= "function" then return false end
+                local ref = { f }
+                local w = factory(function(...) return ref[1](...) end)
+                if newcclosure then
+                    local ok, wc = pcall(newcclosure, w)
+                    if ok then w = wc end
+                end
+                if hookfunction then
+                    local ok, orig = pcall(hookfunction, f, w)
+                    if ok and type(orig) == "function" then
+                        ref[1] = orig; return true
+                    end
+                end
+                ref[1] = f; tbl[name] = w; return true
+            end
+
+            local function host(u)
+                local h = u:match("^%a[%w+.%-]*://([^/%?#]+)") or u:match("^([^/%?#]+)")
+                h = (h or ""):lower()
+                if h:find(":", 1, true) then h = (h:gsub(":%d+$", "")) end
+                return h
+            end
+
+            local function scoreLayer(s)
+                if not s or #s < 100 then return 0 end
+                local sample = s:sub(1, 20000)
+                local score = math.min(#s // 500, 200)
+                for _, tok in ipairs(LUA_TOKENS) do
+                    local cnt, i = 0, 1
+                    while true do
+                        local j = sample:find(tok, i, true)
+                        if not j then break end
+                        cnt = cnt + 1; i = j + #tok
+                        if cnt >= 10 then break end
+                    end
+                    score = score + cnt * 5
+                end
+                return score
+            end
+
+            -- hook loadstring
+            hookfn(getgenv(), "loadstring", function(orig)
+                return function(s, ...)
+                    if type(s) == "string" and #s < 50 then
+                        return orig(s, ...)
+                    end
+                    
+                    if type(s) == "string" and #s > 1000000 then
+                        print("Capa ignorada por tamano | bytes=" .. #s)
+                        return function() end
+                    end
+                    if lsDepth > 0 then
+                        local res = table.pack(pcall(orig, s, ...))
+                        if not res[1] or not res[2] then return function() end end
+                        return table.unpack(res, 2, res.n)
+                    end
+                    lsDepth = lsDepth + 1
+                    layers = layers + 1
+                    local t = tostring(s)
+                    local sc = scoreLayer(t)
+                    
+                    if sc >= 10 then
+                        local outPath = pathFor(layers)
+                        if pcall(writefile, outPath, t) then
+                            print("Capa guardada: layer_" .. layers .. ".lua | bytes=" .. #t)
+                        end
+                    end
+                    local res = table.pack(pcall(orig, s, ...))
+                    lsDepth = lsDepth - 1
+                    if not res[1] then error(res[2], 0) end
+                    if not res[2] then return function() end end
+                    return table.unpack(res, 2, res.n)
+                end
+            end)
+
+            -- hook http
+            pcall(function()
+                local oldNC
+                oldNC = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+                    if checkcaller and not checkcaller() then return oldNC(self, ...) end
+                    local m = getnamecallmethod()
+                    if m ~= "HttpGet" and m ~= "HttpGetAsync" and m ~= "RequestAsync" then
+                        return oldNC(self, ...)
+                    end
+                    
+                    local a1 = ...
+                    if type(a1) == "string" then
+                        local lowerU = a1:lower()
+                        
+                        -- deteccion durante la peticion
+                        if lowerU:find("luamor") or lowerU:find("superflow") then
+                            print("Luamor superflow detectado")
+                        end
+
+                        -- bypass luarmor
+                        if lowerU:find("blacklist") or lowerU:find("banned") or lowerU:find("status") then
+                            print("Bypass de Blacklist Luarmor activado.")
+                            return '{"status":"ok","message":"User is whitelisted","data":{"banned":false}}'
+                        end
+
+                        -- guardar cfg
+                        if lowerU:find("%.json") or lowerU:find("%.cfg") or lowerU:find("%.txt") then
+                            local res = oldNC(self, ...)
+                            if type(res) == "string" and #res > 10 then
+                                local name = a1:match("([^/]+)%.%w+$") or "cfg_" .. os.time()
+                                local cfgPath = CONFIG_DIR .. "/" .. name
+                                if writefile then pcall(writefile, cfgPath, res) end
+                                print("CFG guardado en config extract: " .. name)
+                            end
+                            return res
+                        end
+
+                        -- guardar payload luarmor
+                        if lowerU:find("luamor") or lowerU:find("superflow") or lowerU:find("bytecode") then
+                            local res = oldNC(self, ...)
+                            if type(res) == "string" then
+                                local payloadPath = DIR .. "/payload_" .. os.time() .. ".txt"
+                                if writefile then pcall(writefile, payloadPath, res) end
+                                print("Payload Luarmor guardado | bytes=" .. #res)
+                            end
+                            return res
+                        end
+
+                        if os.clock() < bypassUntil then return oldNC(self, ...) end
+                        
+                        return oldNC(self, ...)
+                    end
+                    return oldNC(self, ...)
+                end))
+            end)
+
+            bypassUntil = os.clock() + (BYPASS_LOADER and GRACE or 0)
+
+            print("Descargando loader principal...")
+            local src, fromCache = safeHttpGet(LOADER_URL)
+
+            if src then
+                print("Loader OK | bytes=" .. #src)
+                local fn, lerr = loadstring(src)
+                if fn then
+                    local execOk, execErr = pcall(fn)
+                    if not execOk then print("Error ejecutando loader: " .. tostring(execErr)) end
+                else
+                    print("Error compilando loader: " .. tostring(lerr))
+                end
+            else
+                print("Error: fallo al descargar el loader principal")
+            end
+
+            bypassUntil = os.clock() + (BYPASS_LOADER and GRACE or 0)
+
+            task.delay(GRACE + 5, function()
+                print("Resumen Final: Capas extraidas -> " .. layers)
+            end)
+        end)
+        if not okTop then print("Error general: " .. tostring(errTop)) end
+    end)
+end
