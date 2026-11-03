@@ -1,23 +1,31 @@
+local EXTRACT_DIR = getgenv().EXTRACT_DIR or "Bladex/extract"
 
--- SquareWeb Extractor
--- utilidades de red
 local function safeHttpGet(url)
-    local ok, res = pcall(function() return game:HttpGet(url) end)
-    if ok and type(res) == "string" and #res > 0 then
-        if not res:sub(1, 50):lower():find("<!doctype") and not res:sub(1, 50):lower():find("<html") then
-            return res 
-        end
-    end
-    
     local req = (syn and syn.request) or (http and http.request) or http_request or request
     if req then
         local reqOk, reqRes = pcall(req, {
             Url = url,
             Method = "GET",
-            Headers = { ["User-Agent"] = "Roblox/WinInet" }
+            Headers = { 
+                ["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
         })
         if reqOk and type(reqRes) == "table" and reqRes.StatusCode == 200 and reqRes.Body then 
-            return reqRes.Body 
+            local body = reqRes.Body
+            if type(body) == "string" and #body > 0 then
+                local lowerHead = body:sub(1, 100):lower()
+                if not lowerHead:find("<!doctype") and not lowerHead:find("<html") then
+                    return body 
+                end
+            end
+        end
+    end
+
+    local ok, res = pcall(function() return game:HttpGet(url) end)
+    if ok and type(res) == "string" and #res > 0 then
+        local lowerHead = res:sub(1, 100):lower()
+        if not lowerHead:find("<!doctype") and not lowerHead:find("<html") then
+            return res 
         end
     end
     return nil, "HTTP Fetch Failed"
@@ -36,7 +44,6 @@ local function extractURL(input)
     return nil
 end
 
--- formato de tamaño
 local function formatSize(bytes)
     if bytes >= 1024 * 1024 then
         return string.format("%.2f MB", bytes / (1024 * 1024))
@@ -47,7 +54,6 @@ local function formatSize(bytes)
     end
 end
 
--- extractor v1
 local function execSquareWebV1(input)
     task.spawn(function()
         local okTop, errTop = pcall(function()
@@ -61,7 +67,6 @@ local function execSquareWebV1(input)
 
             local LOADER_URL = url
             local layers, lsDepth = 0, 0
-            local LUA_TOKENS = { "function", "local ", "return", "end " }
 
             local function pathFor(n) return DIR .. "/layer_" .. n .. ".lua" end
 
@@ -84,7 +89,6 @@ local function execSquareWebV1(input)
                 ref[1] = f; tbl[name] = w; return true
             end
 
-            -- hook loadstring
             hookfn(getgenv(), "loadstring", function(orig)
                 return function(s, ...)
                     if type(s) == "string" and #s < 50 then return orig(s, ...) end
@@ -134,7 +138,6 @@ local function execSquareWebV1(input)
     end)
 end
 
--- extractor v2
 local function execSquareWebV2(url, input)
     task.spawn(function()
         local attempt = 1
@@ -341,7 +344,6 @@ local function execSquareWebV2(url, input)
     end)
 end
 
--- enrutador principal
 local function execSquareWeb(input)
     local url = extractURL(input)
     if not url then 
@@ -350,15 +352,24 @@ local function execSquareWeb(input)
     end
 
     print("-- SquareWeb detectado. Analizando...")
-    local sample = safeHttpGet(url)
     
-    if not sample then
-        print("-- Error al descargar muestra")
+    if url:find("webproxy.squareweb.app", 1, true) then
+        print("-- Firma V1 (Proxy) encontrada")
+        execSquareWebV1(input)
         return
     end
 
-    if sample:find("KURL", 1, true) or sample:find("SEED2", 1, true) then
-        print("-- Firma V2 encontrada")
+    local sample = safeHttpGet(url)
+    
+    if not sample then
+        print("-- Sin muestra. Asumiendo V2 por defecto...")
+        execSquareWebV2(url, input)
+        return
+    end
+
+    -- NUEVA VALIDACION: Buscamos las firmas reales de la capa 1 de V2
+    if sample:find("V3nt", 1, true) or sample:find("LG_DEBUG", 1, true) or sample:find("__LG_BYPASS", 1, true) or sample:find("KURL", 1, true) or sample:find("SEED2", 1, true) then
+        print("-- Firma V2/V3nt encontrada en Layer 1")
         execSquareWebV2(url, input)
     else
         print("-- Firma V1 encontrada")
