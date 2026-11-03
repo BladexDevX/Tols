@@ -24,7 +24,7 @@ while not LocalPlayer do task.wait() LocalPlayer = Players.LocalPlayer end
 
 local Config = {
 	MaxLogs = 500,
-	Notify = true,
+	Notify = false,
 	NetMode = "filter",
 	StrictAllowlist = false,
 	AllowHosts = { "raw.githubusercontent.com", "github.com", "api.github.com" },
