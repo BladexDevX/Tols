@@ -1,4 +1,3 @@
---svc
 local Players      = game:GetService("Players")
 local UIS          = game:GetService("UserInputService")
 local CoreGui      = game:GetService("CoreGui")
@@ -7,62 +6,251 @@ local RunService   = game:GetService("RunService")
 local LP           = Players.LocalPlayer
 local PGui         = LP:WaitForChild("PlayerGui", 10)
 
---cfg
 local URL_LOADER_ICON = "https://raw.githubusercontent.com/BladexDevX/loader/refs/heads/main/BladexIconLoader"
 local URL_THEME_DARK  = "https://raw.githubusercontent.com/bladexhub/Tols/refs/heads/main/f9/config%20settings"
-local URL_BLACKLIST   = "https://raw.githubusercontent.com/bladexhub/Tols/refs/heads/main/extractor%20/blacklist"
-local URL_FPS_OPT     = "https://raw.githubusercontent.com/bladexhub/Tols/refs/heads/main/extractor%20/fps"
+local URL_SECURITY_GUARD = "https://raw.githubusercontent.com/bladexhub/Tols/refs/heads/main/extractor%20/security%20guard"
+local URL_EXTRACTOR_LUAMOR = "https://raw.githubusercontent.com/bladexhub/Tols/refs/heads/main/extractor%20/luamor"
+local URL_EXTRACTOR_SQUAREWEB = "https://raw.githubusercontent.com/bladexhub/Tols/refs/heads/main/extractor%20/squarweb"
+local URL_EXTRACTOR_GENERIC = "https://raw.githubusercontent.com/bladexhub/Tols/refs/heads/main/extractor%20/generic"
+local URL_LOG_HANDLER = "https://raw.githubusercontent.com/bladexhub/Tols/refs/heads/main/extractor%20/logger"
 
-local SET = { DEFAULT_W=620, DEFAULT_H=420, MIN_W=360, MIN_H=240, RESIZE_EDGE=26 }
-local ICO = {
-    chevron="chevron-right", error="circle-x", warn="alert-triangle",
-    info="info", check="circle-check", ret="corner-down-left",
-    logo="bladex-hud-logo", minimized="code", play="play", minus="minus",
+local INTERNAL_URLS = {
+    URL_LOADER_ICON, URL_THEME_DARK, URL_SECURITY_GUARD,
+    URL_EXTRACTOR_LUAMOR, URL_EXTRACTOR_SQUAREWEB, URL_EXTRACTOR_GENERIC, URL_LOG_HANDLER
 }
 
---fetch
-local function fetch(url)
-    local ok, res = pcall(function() return game:HttpGet(url) end)
-    if ok and type(res) == "string" and #res > 0 then return res end
+local SET = { DEFAULT_W=620, DEFAULT_H=420, MIN_W=360, MIN_H=240, RESIZE_EDGE=26 }
+
+local ICO = {
+    chevron="chevron-right", error="x", warn="alert-triangle",
+    info="info", check="check", ret="corner-down-left",
+    logo="bladex-hud-logo", minimized="code", play="play", minus="minus",
+    stop="square" 
+}
+
+local CACHE = {
+    enabled = true, theme = true, sec_guard = true, icon_loader = true,   
+    luamor_extractor = true, squarweb_extractor = true, generic_extractor = true,
+    logger = true, v2_layer2 = true, v2_layer3 = true, v2_fragments = true, v2_keys = true,
+}
+
+local CONFIG_DIR = "Bladex/config-extract"
+local EXTRACT_DIR = "Bladex/extract"
+
+getgenv().CONFIG_DIR = CONFIG_DIR
+getgenv().EXTRACT_DIR = EXTRACT_DIR
+
+pcall(makefolder, "Bladex")
+pcall(makefolder, CONFIG_DIR)
+pcall(makefolder, EXTRACT_DIR)
+
+local cacheHits, cacheMisses = 0, 0
+
+local function hashUrl(url)
+    local h = 5381
+    for i = 1, #url do h = (h * 33 + url:byte(i)) % 4294967296 end
+    return string.format("%08x", h)
+end
+
+local function cachePath(cat, url)
+    local filename = cat
+    if cat == "cfg" then filename = "config" end
+    return CONFIG_DIR .. "/" .. filename .. ".lua"
+end
+
+local function cacheGet(cat, url)
+    if not CACHE.enabled or CACHE[cat] == false then return nil end
+    local p = cachePath(cat, url)
+    if isfile and isfile(p) and readfile then
+        local ok, c = pcall(readfile, p)
+        if ok and type(c) == "string" and #c > 0 then return c end
+    end
     return nil
 end
-local function fetchTable(url)
-    local code = fetch(url); if not code then return nil end
+
+local function cacheSet(cat, url, content)
+    if not CACHE.enabled or CACHE[cat] == false then return end
+    if content:sub(1, 50):lower():find("<!doctype") or content:sub(1, 50):lower():find("<html") then return end
+    if writefile then
+        local p = cachePath(cat, url)
+        pcall(writefile, p, content)
+    end
+end
+
+local function getRequest()
+    return (syn and syn.request) or (http and http.request) or http_request or request
+end
+
+local function metaPath(cat, url)
+    return cachePath(cat, url) .. ".meta"
+end
+
+local function readMeta(cat, url)
+    local mp = metaPath(cat, url)
+    if not (isfile and readfile and isfile(mp)) then return nil end
+    local ok, m = pcall(readfile, mp)
+    if not ok or type(m) ~= "string" or #m == 0 then return nil end
+    local etag, lastMod = m:match("^(.-)\n(.*)$")
+    if not etag and not lastMod then return nil end
+    return {etag = (etag ~= "" and etag or nil), lastMod = (lastMod ~= "" and lastMod or nil)}
+end
+
+local function writeMeta(cat, url, etag, lastMod)
+    if not writefile then return end
+    if type(etag) == "string" and #etag == 0 then etag = nil end
+    if type(lastMod) == "string" and #lastMod == 0 then lastMod = nil end
+    if not etag and not lastMod then return end
+    pcall(writefile, metaPath(cat, url), (etag or "") .. "\n" .. (lastMod or ""))
+end
+
+local freshCache = {}
+
+local function safeHttpGet(url)
+    local ok, res = pcall(function() return game:HttpGet(url) end)
+    if ok and type(res) == "string" and #res > 0 then
+        if not res:sub(1, 50):lower():find("<!doctype") and not res:sub(1, 50):lower():find("<html") then
+            return res
+        end
+    end
+    local req = getRequest()
+    if req then
+        local reqOk, reqRes = pcall(req, {
+            Url = url,
+            Method = "GET",
+            Headers = { ["User-Agent"] = "Roblox/WinInet" }
+        })
+        if reqOk and type(reqRes) == "table" and tonumber(reqRes.StatusCode) == 200 and reqRes.Body then
+            return reqRes.Body
+        end
+    end
+    return nil, "HTTP Fetch Failed"
+end
+
+local function cacheHttpGet(url, cat)
+    if not CACHE.enabled or CACHE[cat] == false then
+        return safeHttpGet(url)
+    end
+
+    if freshCache[cat] then
+        local c = cacheGet(cat, url)
+        if c then cacheHits = cacheHits + 1; return c, true end
+    end
+
+    local c = cacheGet(cat, url)
+    local req = getRequest()
+
+    if c and req then
+        local meta = readMeta(cat, url)
+        local headers = { ["User-Agent"] = "Roblox/WinInet" }
+        if meta then
+            if meta.etag then headers["If-None-Match"] = meta.etag end
+            if meta.lastMod then headers["If-Modified-Since"] = meta.lastMod end
+        end
+
+        local ok, res = pcall(req, { Url = url, Method = "GET", Headers = headers })
+        if ok and type(res) == "table" then
+            local status = tonumber(res.StatusCode) or tonumber(res.Status) or 0
+            if status == 304 then
+                freshCache[cat] = true
+                cacheHits = cacheHits + 1
+                return c, true
+            elseif status == 200 and type(res.Body) == "string" and #res.Body > 0 then
+                local head = res.Body:sub(1, 50):lower()
+                if not head:find("<!doctype") and not head:find("<html") then
+                    cacheSet(cat, url, res.Body)
+                    local h = res.Headers or {}
+                    writeMeta(cat, url,
+                        h["etag"] or h["ETag"] or h["Etag"],
+                        h["last-modified"] or h["Last-Modified"])
+                    freshCache[cat] = true
+                    cacheMisses = cacheMisses + 1
+                    return res.Body, false
+                end
+            end
+        end
+        freshCache[cat] = true
+        cacheHits = cacheHits + 1
+        return c, true
+    end
+
+    local r, err = safeHttpGet(url)
+    if r then
+        cacheMisses = cacheMisses + 1
+        cacheSet(cat, url, r)
+        freshCache[cat] = true
+        return r, false
+    end
+    return nil, false, err
+end
+
+local function fetch(url, cat) return (cacheHttpGet(url, cat or "default")) end
+local function fetchTable(url, cat)
+    local code = fetch(url, cat); if not code then return nil end
     local fn = loadstring(code); if not fn then return nil end
     local ok, res = pcall(fn)
     if ok and type(res) == "table" then return res end
     return nil
 end
-local function fetchFunc(url)
-    local code = fetch(url); if not code then return nil end
+local function fetchFunc(url, cat)
+    local code = fetch(url, cat); if not code then return nil end
     return loadstring(code)
 end
 
---theme
-local C = fetchTable(URL_THEME_DARK)
-if not C then return end
-
---blacklist
-local BLACKLIST_ALLOW, BLACKLIST_BLACK = {}, {}
-local function loadBlacklistRemote()
-    local code = fetch(URL_BLACKLIST); if not code then return false end
-    local fn = loadstring(code); if not fn then return false end
-    local ok, tbl = pcall(fn)
-    if not ok or type(tbl) ~= "table" then return false end
-    if tbl.ALLOW then for _, p in ipairs(tbl.ALLOW) do BLACKLIST_ALLOW[tostring(p):lower()] = true end end
-    if tbl.BLACK then for _, p in ipairs(tbl.BLACK) do BLACKLIST_BLACK[tostring(p):lower()] = true end end
-    return true
+local function prewarmCaches()
+    if not CACHE.enabled then return function() end end
+    local jobs = {
+        {URL_SECURITY_GUARD,      "sec_guard"},
+        {URL_LOG_HANDLER,         "logger"},
+        {URL_LOADER_ICON,         "icon_loader"},
+        {URL_THEME_DARK,          "theme"},
+        {URL_EXTRACTOR_LUAMOR,    "luamor_extractor"},
+        {URL_EXTRACTOR_SQUAREWEB, "squarweb_extractor"},
+        {URL_EXTRACTOR_GENERIC,   "generic_extractor"},
+    }
+    local remaining, done = 0, false
+    for _, j in ipairs(jobs) do
+        if CACHE[j[2]] ~= false then
+            remaining = remaining + 1
+            task.spawn(function()
+                pcall(cacheHttpGet, j[1], j[2])
+                remaining = remaining - 1
+                if remaining <= 0 then done = true end
+            end)
+        end
+    end
+    if remaining == 0 then done = true end
+    return function()
+        local timeout = os.clock() + 5
+        while not done and os.clock() < timeout do task.wait(0.02) end
+    end
 end
-local hasRemoteBL = loadBlacklistRemote()
-if not hasRemoteBL then
-    for _, p in ipairs({"luarmor.net","roblox.com","github.com","jsdelivr.net"}) do BLACKLIST_ALLOW[p] = true end
-    for _, p in ipairs({"discord.com","webhook.site","iplogger.org","grabify.link"}) do BLACKLIST_BLACK[p] = true end
-end
 
---icons
+local waitPrewarm = prewarmCaches()
+waitPrewarm()
+
+local function applySecurityGuard()
+    local code = fetch(URL_SECURITY_GUARD, "sec_guard")
+    if code then
+        local fn = loadstring(code)
+        if fn then pcall(fn) end
+    end
+end
+applySecurityGuard()
+
+local LogHandler = nil
+task.spawn(function()
+    local fn = fetchFunc(URL_LOG_HANDLER, "logger")
+    if fn then
+        local ok, res = pcall(fn)
+        if ok and type(res) == "function" then
+            LogHandler = res
+        end
+    end
+end)
+
 local IconLoader = nil
 local loaderThread = task.spawn(function()
-    local fn = fetchFunc(URL_LOADER_ICON); if not fn then return end
+    local fn = fetchFunc(URL_LOADER_ICON, "icon_loader"); if not fn then return end
     local ok, res = pcall(fn)
     if ok and type(res) == "table" then IconLoader = res end
 end)
@@ -78,6 +266,7 @@ local function getIcon(name)
     iconCache[name] = false
     return nil
 end
+
 local iconSlots = {}
 local function applyIcon(holder, name, color, keepColor)
     local id = getIcon(name); if not id then return false end
@@ -89,6 +278,7 @@ local function applyIcon(holder, name, color, keepColor)
     img.Size = UDim2.new(1, 0, 1, 0); img.Parent = holder
     return true
 end
+
 local function mkIcon(name, size, color, parent, keepColor)
     local holder = Instance.new("Frame")
     holder.BackgroundTransparency = 1
@@ -98,6 +288,7 @@ local function mkIcon(name, size, color, parent, keepColor)
     end
     return holder
 end
+
 task.spawn(function()
     for _ = 1, 40 do if IconLoader then break end; task.wait(0.5) end
     if not IconLoader then return end
@@ -107,7 +298,9 @@ task.spawn(function()
     iconSlots = {}
 end)
 
---builders
+local C = fetchTable(URL_THEME_DARK, "theme")
+if not C then return end
+
 local function mk(cls, props, parent)
     local o = Instance.new(cls)
     for k, v in pairs(props) do o[k] = v end
@@ -128,14 +321,12 @@ local function vlist(p, sp)
     l.Padding = UDim.new(0, sp or 0); l.Parent = p
 end
 
---tweens
 local TI_FAST = TweenInfo.new(0.18, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
 local TI_POP  = TweenInfo.new(0.30, Enum.EasingStyle.Back,  Enum.EasingDirection.Out)
 local TI_SOFT = TweenInfo.new(0.20, Enum.EasingStyle.Sine,  Enum.EasingDirection.Out)
 local function TW(o, ti, pr) TweenService:Create(o, ti, pr):Play() end
 local function TWc(o, ti, pr) local t = TweenService:Create(o, ti, pr); t:Play(); return t end
 
---root
 for _, g in ipairs({CoreGui, PGui}) do
     local o = g:FindFirstChild("__BladexExtractorUI")
     if o then o:Destroy() end
@@ -148,7 +339,6 @@ local GUI = mk("ScreenGui", {
     ZIndexBehavior=Enum.ZIndexBehavior.Sibling, IgnoreGuiInset=true, DisplayOrder=9991,
 }, ROOT)
 
---window
 local vp = workspace.CurrentCamera.ViewportSize
 local initW = math.min(SET.DEFAULT_W, vp.X - 16)
 local initH = math.min(SET.DEFAULT_H, vp.Y - 40)
@@ -163,8 +353,7 @@ local WIN = mk("Frame", {
 corner(WIN, 16); stroke(WIN, C.WBRD, 1.5)
 local WIN_SCALE = Instance.new("UIScale", WIN); WIN_SCALE.Scale = 1
 
---title
-local TB = mk("Frame", {Size=UDim2.new(1,0,0,36), BackgroundColor3=C.HDR2, BorderSizePixel=0, ZIndex=20, Active=true}, WIN)
+local TB = mk("Frame", {Size=UDim2.new(1,0,0,36), BackgroundColor3=C.HDR2, BorderSizePixel=0, ZIndex=20, Active=true, ClipsDescendants=true}, WIN)
 corner(TB, 16)
 mk("Frame", {Size=UDim2.new(1,0,0,12), Position=UDim2.new(0,0,1,-12), BackgroundColor3=C.HDR2, BorderSizePixel=0, ZIndex=19}, TB)
 mk("Frame", {Size=UDim2.new(1,0,0,1), Position=UDim2.new(0,0,1,-1), BackgroundColor3=C.DIV, BorderSizePixel=0, ZIndex=21}, TB)
@@ -172,37 +361,49 @@ mk("Frame", {Size=UDim2.new(1,0,0,1), Position=UDim2.new(0,0,1,-1), BackgroundCo
 local titleIco = mkIcon(ICO.logo, 20, C.TXTW, TB, true)
 titleIco.Position = UDim2.new(0, 10, 0.5, -10); titleIco.ZIndex = 21
 mk("TextLabel", {Text="BLADEX EXTRACTOR", TextColor3=C.TXTW, Font=Enum.Font.Gotham,
-    TextSize=12, BackgroundTransparency=1, Size=UDim2.new(0,130,1,0),
+    TextSize=12, BackgroundTransparency=1, Size=UDim2.new(0,160,1,0),
     Position=UDim2.new(0,38,0,0), TextYAlignment=Enum.TextYAlignment.Center,
     TextXAlignment=Enum.TextXAlignment.Left, ZIndex=21}, TB)
 
 local function titleBtn(iconName, bg, xOff)
     local b = mk("TextButton", {Text="", BackgroundColor3=bg, Size=UDim2.new(0,28,0,22),
         Position=UDim2.new(1,xOff,0.5,0), AnchorPoint=Vector2.new(1,0.5),
-        BorderSizePixel=0, ZIndex=90, AutoButtonColor=false}, TB)
+        BorderSizePixel=0, ZIndex=90, AutoButtonColor=false, ClipsDescendants=true}, TB)
     corner(b, 4)
     local bScale = Instance.new("UIScale", b)
     local ic = mkIcon(iconName, 14, C.TXTW, b, true); ic.Position = UDim2.new(0.5, -7, 0.5, -7)
-    b.MouseEnter:Connect(function() TW(b, TI_FAST, {BackgroundTransparency=0.25}); TW(bScale, TI_POP, {Scale=1.12}) end)
-    b.MouseLeave:Connect(function() TW(b, TI_SOFT, {BackgroundTransparency=0}); TW(bScale, TI_SOFT, {Scale=1}) end)
-    return b
+    b:SetAttribute("r", bg.R); b:SetAttribute("g", bg.G); b:SetAttribute("b", bg.B)
+    local function getBg() return Color3.new(b:GetAttribute("r"), b:GetAttribute("g"), b:GetAttribute("b")) end
+    b.MouseEnter:Connect(function()
+        if not b.Parent then return end
+        TW(b, TI_FAST, {BackgroundColor3 = getBg():Lerp(Color3.new(1,1,1), 0.15)})
+        TW(bScale, TI_POP, {Scale = 1.12})
+    end)
+    b.MouseLeave:Connect(function()
+        if not b.Parent then return end
+        TW(b, TI_SOFT, {BackgroundColor3 = getBg()}); TW(bScale, TI_SOFT, {Scale = 1})
+    end)
+    return b, ic
 end
-local CLOSE_BTN = titleBtn("x", C.CLOSE, -6)
-local MINI_BTN  = titleBtn(ICO.minus, C.MINI, -38)
 
---console
+local COL_CLOSE = Color3.fromRGB(244, 46, 22)
+local COL_MINI = Color3.fromRGB(0, 0, 255)
+
+local CLOSE_BTN = titleBtn("x", COL_CLOSE, -6)
+local MINI_BTN  = titleBtn(ICO.minus, COL_MINI, -38)
+
 local CONTENT = mk("Frame", {Size=UDim2.new(1,0,1,-36), Position=UDim2.new(0,0,0,36),
     BackgroundTransparency=1, ClipsDescendants=true, ZIndex=15}, WIN)
 local CON_OUT_BOX = mk("Frame", {Size=UDim2.new(1,-20,1,-62), Position=UDim2.new(0,10,0,10),
-    BackgroundColor3=C.CON_INP, BorderSizePixel=0, ZIndex=15}, CONTENT)
-corner(CON_OUT_BOX, 6); stroke(CON_OUT_BOX, C.CON_BRD, 1)
+    BackgroundColor3=C.CON_INP, BorderSizePixel=0, ZIndex=15, ClipsDescendants=true}, CONTENT)
+corner(CON_OUT_BOX, 6); 
+local conStroke = stroke(CON_OUT_BOX, C.CON_BRD, 1)
 local CON_SCR = mk("ScrollingFrame", {Size=UDim2.new(1,-8,1,-8), Position=UDim2.new(0,4,0,4),
     BackgroundTransparency=1, BorderSizePixel=0, ScrollBarThickness=4,
     ScrollBarImageColor3=Color3.fromRGB(80,80,80), CanvasSize=UDim2.new(0,0,0,0),
-    AutomaticCanvasSize=Enum.AutomaticSize.Y, ZIndex=15}, CON_OUT_BOX)
+    AutomaticCanvasSize=Enum.AutomaticSize.Y, ZIndex=15, ClipsDescendants=true}, CON_OUT_BOX)
 vlist(CON_SCR, 2); pad(CON_SCR, 4, 4, 6, 6)
 
---scroll
 local lineCounter = 0
 local isOpen, savedScroll, lockScroll, scrollConn = true, nil, false, nil
 local function killScroll() if scrollConn then scrollConn:Disconnect(); scrollConn = nil end end
@@ -230,16 +431,16 @@ local function scrollToBottom()
         RunService.Heartbeat:Wait(); doScrollTo(maxScrollY())
     end)
 end
-local function addLine(text, color, level, iconName)
-    if lineCounter > 30 then
+
+local function drawLine(text, color, level, iconName)
+    if lineCounter > 100 then
         for _, c in ipairs(CON_SCR:GetChildren()) do
             if c:IsA("Frame") then c:Destroy(); break end
         end
-    else
-        lineCounter = lineCounter + 1
-    end
+    else lineCounter = lineCounter + 1 end
+    
     local row = mk("Frame", {Size=UDim2.new(1,0,0,0), AutomaticSize=Enum.AutomaticSize.Y,
-        BackgroundTransparency=1, LayoutOrder=lineCounter+1, ZIndex=16}, CON_SCR)
+        BackgroundTransparency=1, LayoutOrder=lineCounter+1, ZIndex=16, ClipsDescendants=true}, CON_SCR)
     local textX = 0
     local textSizeX = UDim2.new(1, 0, 0, 0)
     if iconName then
@@ -250,57 +451,111 @@ local function addLine(text, color, level, iconName)
     local lbl = mk("TextLabel", {Size=textSizeX, Position=UDim2.new(0,textX,0,0),
         AutomaticSize=Enum.AutomaticSize.Y, BackgroundTransparency=1, Text=text,
         TextColor3=color or C.CON_TXT, TextSize=11, Font=Enum.Font.Code,
-        TextXAlignment=Enum.TextXAlignment.Left, TextWrapped=true, ZIndex=16, Active=false}, row)
+        TextXAlignment=Enum.TextXAlignment.Left, TextWrapped=true, ZIndex=16, Active=false, ClipsDescendants=true}, row)
     lbl:SetAttribute("level", level or "info")
     scrollToBottom()
-    return row
 end
 
---fps
-task.spawn(function()
-    local ok, src = pcall(function() return game:HttpGet(URL_FPS_OPT) end)
-    if not ok or type(src) ~= "string" or #src < 100 then return end
-    local head = src:sub(1, 30):lower()
-    if head:find("<!doctype") or head:find("<html") then return end
-    local fn = loadstring(src); if not fn then return end
-    pcall(fn)
-end)
+local logQueue = {}
+local isProcessingQueue = false
 
---input
+local function processQueue()
+    if isProcessingQueue then return end
+    isProcessingQueue = true
+    task.spawn(function()
+        while #logQueue > 0 do
+            local data = table.remove(logQueue, 1)
+            local cleanText = data.text:gsub("^%-%-%s*", ""):gsub("^%-%-", "")
+            drawLine(cleanText, data.color, data.level, data.icon)
+            task.wait(0.08)
+        end
+        isProcessingQueue = false
+    end)
+end
+
+local function addLine(text, color, level, iconName, instant)
+    table.insert(logQueue, {text=text, color=color, level=level, icon=iconName})
+    if instant then
+        local data = table.remove(logQueue)
+        if data then drawLine(data.text, data.color, data.level, data.icon) end
+    end
+    processQueue()
+end
+
+local function clearConsole()
+    for _, c in ipairs(CON_SCR:GetChildren()) do
+        if c:IsA("Frame") then c:Destroy() end
+    end
+    lineCounter = 0
+end
+
 local INPUT_ROW = mk("Frame", {Size=UDim2.new(1,-20,0,34), Position=UDim2.new(0,10,1,-44),
-    BackgroundTransparency=1, ZIndex=15}, CONTENT)
+    BackgroundTransparency=1, ZIndex=15, ClipsDescendants=false}, CONTENT)
 local promptIco = mkIcon(ICO.chevron, 12, C.CON_TXT, INPUT_ROW); promptIco.Position = UDim2.new(0, 2, 0.5, -6)
-local INPUT_BG = mk("Frame", {Size=UDim2.new(1,-100,1,0), Position=UDim2.new(0,20,0,0),
-    BackgroundColor3=C.CON_INP, BorderSizePixel=0, ZIndex=15}, INPUT_ROW)
-corner(INPUT_BG, 6); local inputStroke = stroke(INPUT_BG, C.CON_BRD, 1)
+
+local INPUT_BG = mk("Frame", {Size=UDim2.new(1,-100,1,-6), Position=UDim2.new(0,20,0,3),
+    BackgroundColor3=C.CON_INP, BorderSizePixel=0, ZIndex=15, ClipsDescendants=false}, INPUT_ROW)
+corner(INPUT_BG, 6); 
+local inputStroke = stroke(INPUT_BG, C.CON_BRD, 1)
 local INPUT = mk("TextBox", {Size=UDim2.new(1,-16,1,0), Position=UDim2.new(0,8,0,0),
     BackgroundTransparency=1, PlaceholderText='URL o loadstring(game:HttpGet("..."))()',
     PlaceholderColor3=C.TXTD, Text="", TextColor3=C.CON_TXT, Font=Enum.Font.Code, TextSize=12,
-    TextXAlignment=Enum.TextXAlignment.Left, ClearTextOnFocus=false, ZIndex=16}, INPUT_BG)
+    TextXAlignment=Enum.TextXAlignment.Left, ClearTextOnFocus=false, ZIndex=16, ClipsDescendants=true}, INPUT_BG)
 
-local exec
-INPUT.Focused:Connect(function() TW(inputStroke, TI_SOFT, {Color=C.BLUE, Thickness=1.5}) end)
-INPUT.FocusLost:Connect(function(enter)
-    TW(inputStroke, TI_SOFT, {Color=C.CON_BRD, Thickness=1})
-    if enter then local c = INPUT.Text; INPUT.Text = ""; exec(c) end
-end)
-
---run btn
 local RUN_BTN = mk("TextButton", {Text="", BackgroundColor3=Color3.fromRGB(20,80,34),
     BorderSizePixel=0, AutoButtonColor=false, Size=UDim2.new(0,70,1,0),
-    Position=UDim2.new(1,-70,0,0), ZIndex=15}, INPUT_ROW)
-corner(RUN_BTN, 6); stroke(RUN_BTN, C.GREEN, 1.2)
+    Position=UDim2.new(1,-70,0,0), ZIndex=15, ClipsDescendants=true}, INPUT_ROW)
+corner(RUN_BTN, 6); 
+local runStroke = stroke(RUN_BTN, C.GREEN, 1.2)
 local runIco = mkIcon(ICO.play, 14, C.TXTW, RUN_BTN); runIco.Position = UDim2.new(0, 10, 0.5, -7)
-mk("TextLabel", {Text="RUN", TextColor3=C.TXTW, Font=Enum.Font.GothamBold, TextSize=12,
+local runLbl = mk("TextLabel", {Text="RUN", TextColor3=C.TXTW, Font=Enum.Font.GothamBold, TextSize=12,
     BackgroundTransparency=1, Size=UDim2.new(1,-30,1,0), Position=UDim2.new(0,28,0,0),
     TextXAlignment=Enum.TextXAlignment.Left, ZIndex=16}, RUN_BTN)
-RUN_BTN.MouseEnter:Connect(function() TW(RUN_BTN, TI_FAST, {BackgroundColor3=Color3.fromRGB(32,110,48)}) end)
-RUN_BTN.MouseLeave:Connect(function() TW(RUN_BTN, TI_SOFT, {BackgroundColor3=Color3.fromRGB(20,80,34)}) end)
 
---history
 local history, histIdx = {}, 0
+local execRunning, execCancelled = false, false
 
---url
+local pulseConn = nil
+local pulseVal = 0
+
+local function setUIState(running)
+    execRunning = running
+    if running then
+        inputStroke.Color = Color3.fromRGB(255, 50, 50)
+        inputStroke.Thickness = 2
+        conStroke.Color = Color3.fromRGB(255, 50, 50)
+        conStroke.Thickness = 1.5
+        INPUT.TextEditable = false
+        
+        RUN_BTN.BackgroundColor3 = Color3.fromRGB(150, 20, 20)
+        runStroke.Color = Color3.fromRGB(255, 50, 50)
+        runLbl.Text = "STOP"
+        applyIcon(runIco, ICO.stop, C.TXTW, true)
+
+        if pulseConn then pulseConn:Disconnect() end
+        pulseConn = RunService.Heartbeat:Connect(function()
+            pulseVal = (math.sin(os.clock() * 8) + 1) / 2
+            inputStroke.Transparency = 1 - pulseVal
+            conStroke.Transparency = 1 - pulseVal
+        end)
+
+    else
+        if pulseConn then pulseConn:Disconnect(); pulseConn = nil end
+        inputStroke.Color = C.CON_BRD
+        inputStroke.Thickness = 1
+        inputStroke.Transparency = 0
+        conStroke.Color = C.CON_BRD
+        conStroke.Thickness = 1
+        conStroke.Transparency = 0
+        
+        INPUT.TextEditable = true
+        RUN_BTN.BackgroundColor3 = Color3.fromRGB(20,80,34)
+        runStroke.Color = C.GREEN
+        runLbl.Text = "RUN"
+        applyIcon(runIco, ICO.play, C.TXTW, true)
+    end
+end
+
 local function extractURL(input)
     if type(input) ~= "string" then return nil end
     input = input:match("^%s*(.-)%s*$")
@@ -314,391 +569,203 @@ local function extractURL(input)
     return nil
 end
 
---checks
-local function isLayer(code)
-    if type(code) ~= "string" or #code < 150 then return false end
-    if string.find(code, "^%-%- LuaGate") then return true end
-    local p1 = string.find(code, "loadstring", 1, true)
-    if p1 then local p2 = string.find(code, "HttpGet", p1, true); if p2 then return true end end
-    if string.find(code, "HttpGetAsync", 1, true) then return true end
-    if #code > 500 and string.find(code, "function", 1, true) then return true end
-    return false
-end
-local function isLuarmor(code)
-    if type(code) ~= "string" then return false end
-    if string.find(code, "superflow_bytecode", 1, true) then return true end
-    if string.find(code, "Luamor V4 bootstrapper", 1, true) then return true end
-    if string.find(code, "_bsdata", 1, true) and string.find(code, "=", 1, true) then return true end
-    return false
+local function silentCleanup()
+    pcall(function()
+        local targets = {"ImageCache", "cache", "keys"}
+        local dirsToCheck = {"", "./"}
+        
+        for _, dir in ipairs(dirsToCheck) do
+            for _, target in ipairs(targets) do
+                local path = dir ~= "" and (dir .. "/" .. target) or target
+                if isfolder and isfolder(path) then pcall(delfolder, path) end
+                if isfile and isfile(path) then pcall(delfile, path) end
+            end
+        end
+
+        if listfiles then
+            local ok, files = pcall(listfiles, ".")
+            if ok and type(files) == "table" then
+                for _, file in ipairs(files) do
+                    local lower = string.lower(tostring(file))
+                    if lower:find("static_content_") or lower:find("imagecache") then
+                        pcall(delfolder, file)
+                        pcall(delfile, file)
+                    end
+                end
+            end
+        end
+    end)
 end
 
---exec
-exec = function(input)
-    if not input or input:match("^%s*$") then
-        addLine("Error: sin URL. Pega un link del panel.", C.CON_ERR, "err", ICO.error)
-        return
+local function runExtractor(extractorName, urlFetch, input, parsedHost, url)
+    task.spawn(function()
+        setUIState(true)
+        
+        local old_ls = loadstring
+        local original_genv_ls = getgenv().loadstring or loadstring
+        
+        getgenv().loadstring = function(code, name)
+            if type(code) == "string" then
+                if #code > 1500 and not code:find("V3nt") and not code:find("local KA%s*=") and not code:find("KURL") and not code:find("SEED2") then
+                    return function() end
+                end
+            end
+            return original_genv_ls(code, name)
+        end
+        
+        local success, err = pcall(function()
+            local code = fetch(urlFetch, extractorName)
+            if not code then error("Error de descarga") end
+            
+            local fn = old_ls(code)
+            if not fn then error("Error de compilacion") end
+            
+            local ok, execFn = pcall(fn)
+            if not ok or type(execFn) ~= "function" then error("Error de estructura") end
+            
+            local oldPrint = print
+            getgenv().print = function(...)
+                local msg = table.concat({...}, " ")
+                
+                local level, iconName, colorType = "info", "info", "sys"
+                
+                if LogHandler then
+                    local hOk, hLevel, hIcon, hColor = pcall(LogHandler, msg)
+                    if hOk then
+                        level, iconName, colorType = hLevel, hIcon, hColor
+                    end
+                else
+                    if msg:find("guardado") or msg:find("completado") or msg:find("finalizado") or msg:find("extraído") then
+                        level, iconName, colorType = "ok", "check", "ok"
+                    elseif msg:find("error") or msg:find("fallo") then
+                        level, iconName, colorType = "err", "x", "err"
+                    end
+                end
+                
+                local color = C.CON_SYS
+                if colorType == "ok" then color = C.CON_OK
+                elseif colorType == "err" then color = C.CON_ERR
+                elseif colorType == "warn" then color = C.CON_WARN or Color3.new(1, 0.6, 0)
+                end
+                
+                addLine(msg, color, level, iconName)
+                oldPrint(...)
+            end
+            
+            pcall(execFn, input)
+            getgenv().print = oldPrint
+        end)
+        
+        getgenv().loadstring = original_genv_ls
+        
+        if not success then
+            addLine(tostring(err), C.CON_ERR, "err", ICO.error)
+        end
+        
+        local startT = os.clock()
+        while (#logQueue > 0 or isProcessingQueue) and (os.clock() - startT < 3) do
+            task.wait(0.1)
+        end
+        
+        logQueue = {}
+        isProcessingQueue = false
+        
+        local savedDir = EXTRACT_DIR .. "/" .. parsedHost
+        addLine("Guardado en: " .. savedDir, C.CON_SYS, "info", ICO.info)
+        addLine("Proceso finalizado", C.CON_OK, "ok", ICO.check)
+        
+        silentCleanup()
+        setUIState(false)
+    end)
+end
+
+local isFirstRun = true
+
+local function exec(input)
+    if execRunning then return end
+    if not input or input:match("^%s*$") then addLine("Error: sin URL.", C.CON_ERR, "err", ICO.error, true); return end
+    
+    if isFirstRun then
+        clearConsole()
+        isFirstRun = false
+    else
+        addLine(" ", C.CON_TXT, "info", nil, true) 
     end
+
     table.insert(history, 1, input)
     if #history > 60 then table.remove(history) end
     histIdx = 0
 
     local url = extractURL(input)
-    if not url then
-        addLine("Error: URL no válido.", C.CON_ERR, "err", ICO.error)
-        return
+    if not url then addLine("Error: URL no válido.", C.CON_ERR, "err", ICO.error, true); return end
+
+    for _, intUrl in ipairs(INTERNAL_URLS) do
+        if url == intUrl then
+            addLine("Error: Esta es una URL interna del sistema. No se puede extraer.", C.CON_ERR, "err", ICO.error, true)
+            return
+        end
     end
 
-    task.spawn(function()
-        -- Extraer el dominio de la URL para crear su carpeta única
-        local parsedHost = url:match("^%a+://([^/%?#:]+)") or "desconocido"
-        parsedHost = parsedHost:lower()
+    cacheHits, cacheMisses = 0, 0
+    execCancelled = false
 
-        --pipeline cfg (sistema Bladex)
-        local DIR            = "Bladex/extract/" .. parsedHost
-        local MODE           = "blacklist"
-        local AUTO_BLACK     = false -- Desactivado para no bloquear nuevos enlaces
-        local FAKE           = true
-        local BYPASS_LOADER  = true
-        local GRACE          = 20
-        local PRINT          = true
-        local PRINT_MIN      = 0.4
-        local LOG_LIMIT      = 2000000
-        local CACHE_LIMIT    = 4096
-        local VFS            = false -- Desactivado para evitar el error State323 de Luarmor
-        local LOADER_URL     = url
-        local PERSIST        = DIR .. "/lista_negra.txt"
-        local UNKNOWN_FILE   = DIR .. "/desconocidos.txt"
+    local lowerUrl = url:lower()
+    local parsedHost = url and (url:match("^%a+://([^/%?#:]+)") or "extract") or "extract"
+    parsedHost = parsedHost:lower()
 
-        pcall(makefolder, "Bladex")
-        pcall(makefolder, "Bladex/extract")
-        pcall(makefolder, DIR)
-        local uid = string.format("%x", os.time())
-        local function pathFor(n)
-            return DIR .. "/" .. uid .. "-c" .. n .. ".lua"
-        end
-
-        local LUA_TOKENS = { "function", "local ", "return", "end ", "pcall" }
-
-        --sets (parten de blacklist remota)
-        local ALLOW, BLACK = {}, {}
-        for k in pairs(BLACKLIST_ALLOW) do ALLOW[k] = true end
-        for k in pairs(BLACKLIST_BLACK) do BLACK[k] = true end
-
-        addLine("Lista negra: " .. (hasRemoteBL and "remota OK" or "fallback local")
-            .. " | allow=" .. tostring(next(ALLOW) and "sí" or "no")
-            .. " | black=" .. tostring(next(BLACK) and "sí" or "no"), C.CON_OK, "ok", ICO.check)
-
-        --estado
-        local layers, busy, n, seq = 0, false, 0, 0
-        local loading, lastPrint, lsDepth = false, 0, 0
-        local bypassUntil = 0
-        local win, winT, dropped = 0, 0, 0
-        local stats = { pass=0, block=0, unknown=0, dropped=0, padding=0 }
-        local hCache, dCache, seen, unknowns = {}, {}, {}, {}
-        local buf, pend, pendU = {}, {}, {}
-        local bytes, target = 0, DIR .. "/log.txt"
-
-        --hookfn
-        local function hookfn(tbl, name, factory)
-            if not tbl then return false end
-            local f = tbl[name]
-            if type(f) ~= "function" then return false end
-            local ref = { f }
-            local w = factory(function(...) return ref[1](...) end)
-            if newcclosure then
-                local ok, wc = pcall(newcclosure, w)
-                if ok then w = wc end
-            end
-            if hookfunction then
-                local ok, orig = pcall(hookfunction, f, w)
-                if ok and type(orig) == "function" then
-                    ref[1] = orig
-                    return true
-                end
-            end
-            ref[1] = f
-            tbl[name] = w
-            return true
-        end
-
-        local function stamp() return os.date("%H:%M:%S") end
-
-        local function host(u)
-            local h = u:match("^%a[%w+.%-]*://([^/%?#]+)") or u:match("^([^/%?#]+)")
-            h = (h or ""):lower()
-            if h:find(":", 1, true) then h = (h:gsub(":%d+$", "")) end
-            return h
-        end
-
-        local function matchSet(h, set)
-            if set[h] then return true end
-            local i = 1
-            while true do
-                local d = h:find(".", i, true)
-                if not d then return false end
-                if set[h:sub(d + 1)] then return true end
-                i = d + 1
-            end
-        end
-
-        --compute
-        local function compute(u)
-            local h = hCache[u] or host(u)
-            hCache[u] = h
-            if matchSet(h, ALLOW) then return false end
-            if matchSet(h, BLACK) then return true end
-            if MODE == "all" then return true end
-
-            -- Auto-blacklist desactivado
-            if not AUTO_BLACK then
-                if not unknowns[h] then unknowns[h] = true; pendU[#pendU + 1] = h end
-                return false
-            end
-            BLACK[h] = true
-            pend[#pend + 1] = h
-            return true
-        end
-
-        --flush (PERSIST + UNKNOWN + LOG_LIMIT)
-        local writing = false
-        local function flush()
-            if writing or (#buf == 0 and #pend == 0 and #pendU == 0) then return end
-            writing = true
-            local s, p, u = table.concat(buf), nil, nil
-            if #pend > 0 then p = table.concat(pend, "\n") .. "\n" end
-            if #pendU > 0 then u = table.concat(pendU, "\n") .. "\n" end
-            table.clear(buf); table.clear(pend); table.clear(pendU)
-            pcall(function()
-                if p then appendfile(PERSIST, p) end
-                if u then appendfile(UNKNOWN_FILE, u) end
-                if s ~= "" and appendfile then
-                    appendfile(target, s)
-                    bytes = bytes + #s
-                    if bytes > LOG_LIMIT then
-                        n = n + 1
-                        target = DIR .. "/log_" .. n .. ".txt"
-                        bytes = 0
-                    end
-                end
-            end)
-            writing = false
-        end
-
-        --log
-        local function log(line)
-            local now = os.clock()
-            if now - winT >= 1 then winT, win = now, 0 end
-            win = win + 1
-            if win > 500 then dropped = dropped + 1; return end
-            buf[#buf + 1] = stamp() .. " " .. line .. "\n"
-            addLine(line, C.CON_SYS, "info", ICO.info)
-            if PRINT and not loading and (now - lastPrint >= PRINT_MIN) then
-                lastPrint = now
-                print("[HOOK] " .. line)
-            end
-            if #buf >= 128 then flush() end
-        end
-
-        --net
-        local function net(kind, u, body)
-            if u == nil or busy then return false end
-            local full = tostring(u)
-            if full:match("^%s*$") then return false end
-            busy = true
-            local k = full:match("^[^%?]+") or full
-            local cut = dCache[k]
-            if cut == nil then
-                cut = compute(full)
-                if #dCache > CACHE_LIMIT then table.clear(dCache) end
-                dCache[k] = cut
-            end
-            if cut then stats.block = stats.block + 1 else stats.pass = stats.pass + 1 end
-            busy = false
-            return cut, k
-        end
-
-        --scoreLayer
-        local function scoreLayer(s)
-            if not s or #s < 100 then return 0 end
-            local sample = s:sub(1, 20000)
-            local score = math.min(#s // 500, 200)
-            for _, tok in ipairs(LUA_TOKENS) do
-                local cnt, i = 0, 1
-                while true do
-                    local j = sample:find(tok, i, true)
-                    if not j then break end
-                    cnt = cnt + 1; i = j + #tok
-                    if cnt >= 10 then break end
-                end
-                score = score + cnt * 5
-            end
-            return score
-        end
-
-        log("Inicio | placeid=" .. tostring(game.PlaceId)
-            .. " | exec=" .. tostring(identifyexecutor and select(1, identifyexecutor()))
-            .. " | modo=" .. MODE .. " | auto_black=" .. tostring(AUTO_BLACK))
-
-        --persistencia blacklist
-        pcall(function()
-            local f = readfile(PERSIST)
-            if f then
-                local count = 0
-                for l in f:gmatch("[^\r\n]+") do
-                    if l ~= "" and count < 5000 then BLACK[l] = true; count = count + 1 end
-                end
-                if count > 0 then
-                    log("Blacklist persistente cargada: " .. count .. " dominios desde " .. PERSIST)
-                end
-            end
-        end)
-
-        --VFS hooks
-        if VFS then
-            pcall(function()
-                local vfs = {}
-                local isV = function(p)
-                    if type(p) ~= "string" then return false end
-                    return p:lower():find("static_content", 1, true) ~= nil
-                end
-                local hooks = {
-                    makefolder = function(o) return function(p) if isV(p) then return end; return o(p) end end,
-                    writefile  = function(o) return function(p, d) if isV(p) then vfs[p] = tostring(d); return end; return o(p, d) end end,
-                    appendfile = function(o) return function(p, d) if isV(p) then vfs[p] = (vfs[p] or "") .. tostring(d); return end; return o(p, d) end end,
-                    readfile   = function(o) return function(p) if isV(p) then return vfs[p] or "" end; return o(p) end end,
-                    isfile     = function(o) return function(p) if isV(p) then return vfs[p] ~= nil end; return o(p) end end,
-                    delfile    = function(o) return function(p) if isV(p) then vfs[p] = nil; return end; return o(p) end end,
-                }
-                local g = getgenv()
-                if g then
-                    for name, factory in pairs(hooks) do
-                        pcall(hookfn, g, name, factory)
-                    end
-                end
-                if _G and _G ~= g then
-                    for name, factory in pairs(hooks) do
-                        pcall(hookfn, _G, name, factory)
-                    end
-                end
-            end)
-        end
-
-        --loadstring hook
-        hookfn(getgenv(), "loadstring", function(orig)
-            return function(s, ...)
-                if type(s) == "string" and #s > 1000000 then
-                    stats.padding = stats.padding + 1
-                    log("  -> Capa ignorada por tamaño (gigante/relleno) | bytes=" .. #s)
-                    return function() end
-                end
-                if lsDepth > 0 then
-                    local res = table.pack(pcall(orig, s, ...))
-                    if not res[1] or not res[2] then return function() end end
-                    return table.unpack(res, 2, res.n)
-                end
-                lsDepth = lsDepth + 1
-                layers = layers + 1
-                local t = tostring(s)
-                local sc = scoreLayer(t)
-                if sc >= 20 and #t > 200 then
-                    local outPath = pathFor(layers)
-                    if pcall(writefile, outPath, t) then
-                        log("  -> Capa guardada: " .. uid .. "-c" .. layers .. ".lua | bytes=" .. #t .. " | score=" .. sc)
-                    end
-                end
-                local res = table.pack(pcall(orig, s, ...))
-                lsDepth = lsDepth - 1
-                if not res[1] then error(res[2], 0) end
-                if not res[2] then return function() end end
-                return table.unpack(res, 2, res.n)
-            end
-        end)
-
-        --__namecall hook
-        pcall(function()
-            local oldNC
-            oldNC = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
-                if checkcaller and not checkcaller() then return oldNC(self, ...) end
-                local m = getnamecallmethod()
-                if m ~= "HttpGet" and m ~= "HttpGetAsync" and m ~= "RequestAsync" then
-                    return oldNC(self, ...)
-                end
-                if os.clock() < bypassUntil then return oldNC(self, ...) end
-                local a1, a2 = ...
-                local ok, cut
-                if m == "RequestAsync" then
-                    ok, cut = pcall(net, m, a1.Url, a1.Body)
-                else
-                    ok, cut = pcall(net, m, a1, a2)
-                end
-                if ok and cut and FAKE then
-                    return { Success = true, StatusCode = 200, Body = "", Headers = {} }
-                end
-                return oldNC(self, ...)
-            end))
-        end)
-
-        --api pública
-        getgenv().hooklog = {
-            block = function(p) BLACK[tostring(p):lower()] = true; table.clear(dCache) end,
-            allow = function(p) ALLOW[tostring(p):lower()] = true; table.clear(dCache) end,
-            stats = function() return stats end,
-        }
-
-        --flush loop
-        task.spawn(function() while true do task.wait(1); flush() end end)
-
-        --grace
-        bypassUntil = os.clock() + (BYPASS_LOADER and GRACE or 0)
-        loading = true
-
-        -- Asegurar que el host del loader NO esté bloqueado
-        local loaderHost = host(LOADER_URL)
-        if loaderHost then
-            BLACK[loaderHost] = nil
-            ALLOW[loaderHost] = true
-            table.clear(dCache)
-        end
-
-        addLine("Descargando loader desde: " .. tostring(LOADER_URL), C.CON_INF, "info", ICO.info)
-        local okFetch, src = pcall(function() return game:HttpGet(LOADER_URL) end)
+    if lowerUrl:find("squareweb", 1, true) or lowerUrl:find("v3ntauth", 1, true) or lowerUrl:find("webproxy", 1, true) then
+        addLine("SquareWeb detectado", C.CON_SYS, "info", ICO.info)
+        runExtractor("squarweb_extractor", URL_EXTRACTOR_SQUAREWEB, input, parsedHost, url)
         
-        if okFetch and type(src) == "string" then
-            log("Loader descargado | bytes=" .. #src .. " | url=" .. tostring(LOADER_URL))
-            local fn, lerr = loadstring(src)
-            if fn then
-                local execOk, execErr = pcall(fn)
-                if not execOk then log("Error ejecutando loader: " .. tostring(execErr)) end
-            else
-                log("Error compilando loader: " .. tostring(lerr))
-            end
-        else
-            log("Error: fallo al descargar el loader principal")
-            log("Detalle del error: " .. tostring(src))
-        end
-
-        bypassUntil = os.clock() + (BYPASS_LOADER and GRACE or 0)
-        loading = false
-
-        --resumen
-        task.delay(GRACE + 5, function()
-            log("== Resumen de ejecución ==")
-            log("  Capas extraídas: " .. layers .. " | carpeta: " .. DIR)
-            log("  Pass: " .. stats.pass .. " | Block: " .. stats.block .. " | Unknown: " .. stats.unknown)
-            log("  Padding: " .. stats.padding .. " | Dropped: " .. stats.dropped)
-            log("  Blacklist activa: " .. (hasRemoteBL and "remota" or "fallback") .. " | persistentes: " .. tostring(#pend))
-            flush()
-            addLine("=== Completado ===", C.CON_OK, "ok", ICO.check)
-            addLine("Capas: " .. layers .. " | Block: " .. stats.block .. " | Unknown: " .. stats.unknown, C.CON_OK, "ok", ICO.check)
-        end)
-    end)
+    elseif lowerUrl:find("luamor", 1, true) or lowerUrl:find("superflow", 1, true) then
+        addLine("Luamor detectado", C.CON_SYS, "info", ICO.info)
+        runExtractor("luamor_extractor", URL_EXTRACTOR_LUAMOR, input, parsedHost, url)
+        
+    elseif lowerUrl:find("goofyscator", 1, true) or lowerUrl:find("railway.app", 1, true) then
+        addLine("Goofyscator detectado. Usando generic...", C.CON_SYS, "info", ICO.info)
+        runExtractor("generic_extractor", URL_EXTRACTOR_GENERIC, input, parsedHost, url)
+        
+    else
+        addLine("Dominio desconocido. Usando generic...", C.CON_SYS, "info", ICO.info)
+        runExtractor("generic_extractor", URL_EXTRACTOR_GENERIC, input, parsedHost, url)
+    end
 end
 
---input evt
-RUN_BTN.MouseButton1Click:Connect(function()
-    local c = INPUT.Text; INPUT.Text = ""; exec(c)
+INPUT.Focused:Connect(function() 
+    if not execRunning then 
+        inputStroke.Color = C.BLUE
+        inputStroke.Thickness = 1.5
+    end
 end)
+INPUT.FocusLost:Connect(function(enter)
+    if not execRunning then 
+        inputStroke.Color = C.CON_BRD
+        inputStroke.Thickness = 1
+    end
+    if enter and not execRunning then
+        local c = INPUT.Text; INPUT.Text = ""
+        local ok, err = pcall(exec, c)
+        if not ok then addLine("Error Int: " .. tostring(err), C.CON_ERR, "err", ICO.error, true) end
+    end
+end)
+
+RUN_BTN.MouseButton1Click:Connect(function()
+    if execRunning then
+        execCancelled = true
+        addLine("Abortando...", C.CON_ERR, "warn", ICO.warn)
+    else
+        local c = INPUT.Text; INPUT.Text = ""; exec(c)
+    end
+end)
+RUN_BTN.MouseEnter:Connect(function() 
+    if not execRunning then TW(RUN_BTN, TI_FAST, {BackgroundColor3=Color3.fromRGB(32,110,48)}) end 
+end)
+RUN_BTN.MouseLeave:Connect(function() 
+    if not execRunning then TW(RUN_BTN, TI_SOFT, {BackgroundColor3=Color3.fromRGB(20,80,34)}) end 
+end)
+
 INPUT.InputBegan:Connect(function(inp)
+    if execRunning then return end
     if inp.KeyCode == Enum.KeyCode.Up then
         histIdx = math.min(histIdx + 1, #history); INPUT.Text = history[histIdx] or ""
         task.defer(function() INPUT.CursorPosition = #INPUT.Text + 1 end)
@@ -708,7 +775,6 @@ INPUT.InputBegan:Connect(function(inp)
     end
 end)
 
---drag
 local connections = {}
 local dragging, dragStart, winStart = false, nil, nil
 local resizing, activeHandle = false, nil
@@ -753,7 +819,6 @@ connections[#connections + 1] = UIS.InputEnded:Connect(function(inp)
     end
 end)
 
---resize
 local RESIZE_EDGE = SET.RESIZE_EDGE
 local cornerHandles = {
     {name="TL", px=0, py=0, dx=-1, dy=-1}, {name="TR", px=1, py=0, dx=1, dy=-1},
@@ -801,7 +866,6 @@ connections[#connections + 1] = UIS.InputChanged:Connect(function(inp)
     end
 end)
 
---reopen
 local startYPos = 60
 local knownUIs = {"__DexRoot", "DarkDex", "F9Gui", "Orion", "Linoria", "Synapse", "ScriptWare"}
 for _, guiName in ipairs(knownUIs) do
@@ -809,7 +873,7 @@ for _, guiName in ipairs(knownUIs) do
 end
 local REOPEN_BTN = mk("TextButton", {Name="ReopenBtn", Text="", BackgroundColor3=C.F9BG, BackgroundTransparency=0,
     Size=UDim2.new(0,110,0,30), Position=UDim2.new(0,8,0,startYPos),
-    Visible=false, BorderSizePixel=0, AutoButtonColor=false, ZIndex=200}, GUI)
+    Visible=false, BorderSizePixel=0, AutoButtonColor=false, ZIndex=200, ClipsDescendants=true}, GUI)
 corner(REOPEN_BTN, 10); stroke(REOPEN_BTN, C.BLUE, 1.5)
 local reopenIcon = mkIcon(ICO.minimized, 16, C.TXTW, REOPEN_BTN, true); reopenIcon.Position = UDim2.new(0, 8, 0.5, -8)
 mk("TextLabel", {Text="EXTRACTOR", TextColor3=C.TXTW, Font=Enum.Font.GothamBold, TextSize=11,
@@ -820,7 +884,6 @@ TweenService:Create(reopenScale, TweenInfo.new(1.1, Enum.EasingStyle.Sine, Enum.
 REOPEN_BTN.MouseEnter:Connect(function() if REOPEN_BTN.Parent then TW(REOPEN_BTN, TI_FAST, {BackgroundTransparency=0.25}) end end)
 REOPEN_BTN.MouseLeave:Connect(function() if REOPEN_BTN.Parent then TW(REOPEN_BTN, TI_SOFT, {BackgroundTransparency=0}) end end)
 
---show/hide
 local CLOSED = false
 local function showWindow()
     REOPEN_BTN.Visible = false; CON_SCR.Visible = false; WIN.Visible = true; WIN_SCALE.Scale = 0.9; isOpen = true
@@ -845,9 +908,11 @@ local function hideWindow()
         if WIN and WIN.Parent and not CLOSED then WIN.Visible = false; WIN_SCALE.Scale = 1; REOPEN_BTN.Visible = true end
     end)
 end
+
 local function shutdown()
     if CLOSED then return end
     CLOSED = true
+    execCancelled = true
     dragging = false; resizing = false; activeHandle = nil
     dragStart, winStart = nil, nil; resizeStart, resizeWinPos, resizeWinSize = nil, nil, nil; savedScroll = nil
     pcall(killScroll)
@@ -856,6 +921,7 @@ local function shutdown()
     pcall(function() if loaderThread then task.cancel(loaderThread) end end)
     pcall(function() if GUI and GUI.Parent then GUI:Destroy() end end)
 end
+
 CLOSE_BTN.MouseButton1Click:Connect(function()
     killScroll(); CON_SCR.Visible = false
     local t = TWc(WIN_SCALE, TI_FAST, {Scale=0.85})
@@ -872,6 +938,5 @@ connections[#connections + 1] = UIS.InputBegan:Connect(function(inp, gp)
     end
 end)
 
---ready
-addLine("Listo para que pegues tu url", C.CON_SYS, "info", ICO.chevron)
+addLine("Ingresa un enlace para iniciar", C.CON_SYS, "info", ICO.chevron, true)
 return true
