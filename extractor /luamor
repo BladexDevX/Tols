@@ -1,4 +1,4 @@
---Luamor súperflow 
+-- Luamor superflow
 -- utilidades de red
 local function safeHttpGet(url)
     local ok, res = pcall(function() return game:HttpGet(url) end)
@@ -35,6 +35,17 @@ local function extractURL(input)
     return nil
 end
 
+-- Helper para formatear bytes a KB/MB
+local function formatSize(bytes)
+    if bytes >= 1024 * 1024 then
+        return string.format("%.2f MB", bytes / (1024 * 1024))
+    elseif bytes >= 1024 then
+        return string.format("%.2f KB", bytes / 1024)
+    else
+        return bytes .. " B"
+    end
+end
+
 -- funcion principal
 local function execV1(input)
     task.spawn(function()
@@ -45,7 +56,7 @@ local function execV1(input)
 
             -- deteccion temprana por link
             if parsedHost:find("luarmor") or parsedHost:find("superflow") then
-                print("Luamor superflow detectado")
+                print("-- Luamor superflow detectado")
             end
 
             local DIR            = EXTRACT_DIR .. "/" .. parsedHost
@@ -113,7 +124,7 @@ local function execV1(input)
                     end
                     
                     if type(s) == "string" and #s > 1000000 then
-                        print("Capa ignorada por tamano | bytes=" .. #s)
+                        print("-- Capa ignorada (Muy grande) | " .. formatSize(#s))
                         return function() end
                     end
                     if lsDepth > 0 then
@@ -129,7 +140,7 @@ local function execV1(input)
                     if sc >= 10 then
                         local outPath = pathFor(layers)
                         if pcall(writefile, outPath, t) then
-                            print("Capa guardada: layer_" .. layers .. ".lua | bytes=" .. #t)
+                            print("-- Capa guardada: layer_" .. layers .. ".lua | " .. formatSize(#t))
                         end
                     end
                     local res = table.pack(pcall(orig, s, ...))
@@ -156,12 +167,12 @@ local function execV1(input)
                         
                         -- deteccion durante la peticion
                         if lowerU:find("luamor") or lowerU:find("superflow") then
-                            print("Luamor superflow detectado")
+                            print("-- Luamor superflow detectado en peticion")
                         end
 
                         -- bypass luarmor
                         if lowerU:find("blacklist") or lowerU:find("banned") or lowerU:find("status") then
-                            print("Bypass de Blacklist Luarmor activado.")
+                            print("-- Bypass Blacklist Luamor activado")
                             return '{"status":"ok","message":"User is whitelisted","data":{"banned":false}}'
                         end
 
@@ -172,7 +183,7 @@ local function execV1(input)
                                 local name = a1:match("([^/]+)%.%w+$") or "cfg_" .. os.time()
                                 local cfgPath = CONFIG_DIR .. "/" .. name
                                 if writefile then pcall(writefile, cfgPath, res) end
-                                print("CFG guardado en config extract: " .. name)
+                                print("-- CFG guardado: " .. name .. " | " .. formatSize(#res))
                             end
                             return res
                         end
@@ -183,7 +194,7 @@ local function execV1(input)
                             if type(res) == "string" then
                                 local payloadPath = DIR .. "/payload_" .. os.time() .. ".txt"
                                 if writefile then pcall(writefile, payloadPath, res) end
-                                print("Payload Luarmor guardado | bytes=" .. #res)
+                                print("-- Payload Luamor guardado | " .. formatSize(#res))
                             end
                             return res
                         end
@@ -198,28 +209,30 @@ local function execV1(input)
 
             bypassUntil = os.clock() + (BYPASS_LOADER and GRACE or 0)
 
-            print("Descargando loader principal...")
+            print("-- Descargando loader principal...")
             local src, fromCache = safeHttpGet(LOADER_URL)
 
             if src then
-                print("Loader OK | bytes=" .. #src)
+                print("-- Loader OK | " .. formatSize(#src))
                 local fn, lerr = loadstring(src)
                 if fn then
                     local execOk, execErr = pcall(fn)
-                    if not execOk then print("Error ejecutando loader: " .. tostring(execErr)) end
+                    if not execOk then print("-- Error ejecutando loader: " .. tostring(execErr)) end
                 else
-                    print("Error compilando loader: " .. tostring(lerr))
+                    print("-- Error compilando loader: " .. tostring(lerr))
                 end
             else
-                print("Error: fallo al descargar el loader principal")
+                print("-- Error: fallo al descargar el loader")
             end
 
             bypassUntil = os.clock() + (BYPASS_LOADER and GRACE or 0)
 
             task.delay(GRACE + 5, function()
-                print("Resumen Final: Capas extraidas -> " .. layers)
+                print("-- Resumen Final: Capas extraidas -> " .. layers)
             end)
         end)
-        if not okTop then print("Error general: " .. tostring(errTop)) end
+        if not okTop then print("-- Error general: " .. tostring(errTop)) end
     end)
 end
+
+return execV1
