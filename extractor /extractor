@@ -25,7 +25,7 @@ local ICO = {
     chevron="chevron-right", error="x", warn="alert-triangle",
     info="info", check="check", ret="corner-down-left",
     logo="bladex-hud-logo", minimized="code", play="play", minus="minus",
-    stop="square" 
+    stop="square", shield="shield-check"
 }
 
 local CACHE = {
@@ -39,18 +39,13 @@ local EXTRACT_DIR = "Bladex/extract"
 
 getgenv().CONFIG_DIR = CONFIG_DIR
 getgenv().EXTRACT_DIR = EXTRACT_DIR
+getgenv().isInternalFetch = false
 
 pcall(makefolder, "Bladex")
 pcall(makefolder, CONFIG_DIR)
 pcall(makefolder, EXTRACT_DIR)
 
 local cacheHits, cacheMisses = 0, 0
-
-local function hashUrl(url)
-    local h = 5381
-    for i = 1, #url do h = (h * 33 + url:byte(i)) % 4294967296 end
-    return string.format("%08x", h)
-end
 
 local function cachePath(cat, url)
     local filename = cat
@@ -81,32 +76,11 @@ local function getRequest()
     return (syn and syn.request) or (http and http.request) or http_request or request
 end
 
-local function metaPath(cat, url)
-    return cachePath(cat, url) .. ".meta"
-end
-
-local function readMeta(cat, url)
-    local mp = metaPath(cat, url)
-    if not (isfile and readfile and isfile(mp)) then return nil end
-    local ok, m = pcall(readfile, mp)
-    if not ok or type(m) ~= "string" or #m == 0 then return nil end
-    local etag, lastMod = m:match("^(.-)\n(.*)$")
-    if not etag and not lastMod then return nil end
-    return {etag = (etag ~= "" and etag or nil), lastMod = (lastMod ~= "" and lastMod or nil)}
-end
-
-local function writeMeta(cat, url, etag, lastMod)
-    if not writefile then return end
-    if type(etag) == "string" and #etag == 0 then etag = nil end
-    if type(lastMod) == "string" and #lastMod == 0 then lastMod = nil end
-    if not etag and not lastMod then return end
-    pcall(writefile, metaPath(cat, url), (etag or "") .. "\n" .. (lastMod or ""))
-end
-
-local freshCache = {}
-
 local function safeHttpGet(url)
+    getgenv().isInternalFetch = true
     local ok, res = pcall(function() return game:HttpGet(url) end)
+    getgenv().isInternalFetch = false
+    
     if ok and type(res) == "string" and #res > 0 then
         if not res:sub(1, 50):lower():find("<!doctype") and not res:sub(1, 50):lower():find("<html") then
             return res
@@ -114,11 +88,14 @@ local function safeHttpGet(url)
     end
     local req = getRequest()
     if req then
+        getgenv().isInternalFetch = true
         local reqOk, reqRes = pcall(req, {
             Url = url,
             Method = "GET",
             Headers = { ["User-Agent"] = "Roblox/WinInet" }
         })
+        getgenv().isInternalFetch = false
+        
         if reqOk and type(reqRes) == "table" and tonumber(reqRes.StatusCode) == 200 and reqRes.Body then
             return reqRes.Body
         end
@@ -131,53 +108,19 @@ local function cacheHttpGet(url, cat)
         return safeHttpGet(url)
     end
 
-    if freshCache[cat] then
-        local c = cacheGet(cat, url)
-        if c then cacheHits = cacheHits + 1; return c, true end
-    end
-
     local c = cacheGet(cat, url)
     local req = getRequest()
 
     if c and req then
-        local meta = readMeta(cat, url)
-        local headers = { ["User-Agent"] = "Roblox/WinInet" }
-        if meta then
-            if meta.etag then headers["If-None-Match"] = meta.etag end
-            if meta.lastMod then headers["If-Modified-Since"] = meta.lastMod end
-        end
-
-        local ok, res = pcall(req, { Url = url, Method = "GET", Headers = headers })
-        if ok and type(res) == "table" then
-            local status = tonumber(res.StatusCode) or tonumber(res.Status) or 0
-            if status == 304 then
-                freshCache[cat] = true
-                cacheHits = cacheHits + 1
-                return c, true
-            elseif status == 200 and type(res.Body) == "string" and #res.Body > 0 then
-                local head = res.Body:sub(1, 50):lower()
-                if not head:find("<!doctype") and not head:find("<html") then
-                    cacheSet(cat, url, res.Body)
-                    local h = res.Headers or {}
-                    writeMeta(cat, url,
-                        h["etag"] or h["ETag"] or h["Etag"],
-                        h["last-modified"] or h["Last-Modified"])
-                    freshCache[cat] = true
-                    cacheMisses = cacheMisses + 1
-                    return res.Body, false
-                end
-            end
-        end
-        freshCache[cat] = true
-        cacheHits = cacheHits + 1
-        return c, true
+        getgenv().isInternalFetch = true
+        local ok, res = pcall(req, { Url = url, Method = "GET", Headers = { ["User-Agent"] = "Roblox/WinInet" } })
+        getgenv().isInternalFetch = false
     end
 
     local r, err = safeHttpGet(url)
     if r then
         cacheMisses = cacheMisses + 1
         cacheSet(cat, url, r)
-        freshCache[cat] = true
         return r, false
     end
     return nil, false, err
@@ -227,15 +170,6 @@ end
 
 local waitPrewarm = prewarmCaches()
 waitPrewarm()
-
-local function applySecurityGuard()
-    local code = fetch(URL_SECURITY_GUARD, "sec_guard")
-    if code then
-        local fn = loadstring(code)
-        if fn then pcall(fn) end
-    end
-end
-applySecurityGuard()
 
 local LogHandler = nil
 task.spawn(function()
@@ -360,10 +294,15 @@ mk("Frame", {Size=UDim2.new(1,0,0,1), Position=UDim2.new(0,0,1,-1), BackgroundCo
 
 local titleIco = mkIcon(ICO.logo, 20, C.TXTW, TB, true)
 titleIco.Position = UDim2.new(0, 10, 0.5, -10); titleIco.ZIndex = 21
-mk("TextLabel", {Text="BLADEX EXTRACTOR", TextColor3=C.TXTW, Font=Enum.Font.Gotham,
+
+local titleLbl = mk("TextLabel", {Text="BLADEX EXTRACTOR", TextColor3=C.TXTW, Font=Enum.Font.Gotham,
     TextSize=12, BackgroundTransparency=1, Size=UDim2.new(0,160,1,0),
     Position=UDim2.new(0,38,0,0), TextYAlignment=Enum.TextYAlignment.Center,
     TextXAlignment=Enum.TextXAlignment.Left, ZIndex=21}, TB)
+
+local shieldIco = mkIcon(ICO.shield, 16, Color3.fromRGB(0, 255, 100), TB)
+shieldIco.Position = UDim2.new(0, 160, 0.5, -8); shieldIco.ZIndex = 21
+shieldIco.Visible = false
 
 local function titleBtn(iconName, bg, xOff)
     local b = mk("TextButton", {Text="", BackgroundColor3=bg, Size=UDim2.new(0,28,0,22),
@@ -573,7 +512,6 @@ local function silentCleanup()
     pcall(function()
         local targets = {"ImageCache", "cache", "keys"}
         local dirsToCheck = {"", "./"}
-        
         for _, dir in ipairs(dirsToCheck) do
             for _, target in ipairs(targets) do
                 local path = dir ~= "" and (dir .. "/" .. target) or target
@@ -581,7 +519,6 @@ local function silentCleanup()
                 if isfile and isfile(path) then pcall(delfile, path) end
             end
         end
-
         if listfiles then
             local ok, files = pcall(listfiles, ".")
             if ok and type(files) == "table" then
@@ -601,23 +538,11 @@ local function runExtractor(extractorName, urlFetch, input, parsedHost, url)
     task.spawn(function()
         setUIState(true)
         
-        local old_ls = loadstring
-        local original_genv_ls = getgenv().loadstring or loadstring
-        
-        getgenv().loadstring = function(code, name)
-            if type(code) == "string" then
-                if #code > 1500 and not code:find("V3nt") and not code:find("local KA%s*=") and not code:find("KURL") and not code:find("SEED2") then
-                    return function() end
-                end
-            end
-            return original_genv_ls(code, name)
-        end
-        
         local success, err = pcall(function()
             local code = fetch(urlFetch, extractorName)
             if not code then error("Error de descarga") end
             
-            local fn = old_ls(code)
+            local fn = loadstring(code)
             if not fn then error("Error de compilacion") end
             
             local ok, execFn = pcall(fn)
@@ -626,14 +551,11 @@ local function runExtractor(extractorName, urlFetch, input, parsedHost, url)
             local oldPrint = print
             getgenv().print = function(...)
                 local msg = table.concat({...}, " ")
-                
                 local level, iconName, colorType = "info", "info", "sys"
                 
                 if LogHandler then
                     local hOk, hLevel, hIcon, hColor = pcall(LogHandler, msg)
-                    if hOk then
-                        level, iconName, colorType = hLevel, hIcon, hColor
-                    end
+                    if hOk then level, iconName, colorType = hLevel, hIcon, hColor end
                 else
                     if msg:find("guardado") or msg:find("completado") or msg:find("finalizado") or msg:find("extraído") then
                         level, iconName, colorType = "ok", "check", "ok"
@@ -656,23 +578,34 @@ local function runExtractor(extractorName, urlFetch, input, parsedHost, url)
             getgenv().print = oldPrint
         end)
         
-        getgenv().loadstring = original_genv_ls
-        
-        if not success then
-            addLine(tostring(err), C.CON_ERR, "err", ICO.error)
-        end
+        if not success then addLine(tostring(err), C.CON_ERR, "err", ICO.error) end
         
         local startT = os.clock()
-        while (#logQueue > 0 or isProcessingQueue) and (os.clock() - startT < 3) do
-            task.wait(0.1)
-        end
+        while (#logQueue > 0 or isProcessingQueue) and (os.clock() - startT < 3) do task.wait(0.1) end
         
         logQueue = {}
         isProcessingQueue = false
         
         local savedDir = EXTRACT_DIR .. "/" .. parsedHost
-        addLine("Guardado en: " .. savedDir, C.CON_SYS, "info", ICO.info)
-        addLine("Proceso finalizado", C.CON_OK, "ok", ICO.check)
+        local isEmpty = true
+        if listfiles then
+            local okL, files = pcall(listfiles, savedDir)
+            if okL and type(files) == "table" then
+                if #files > 0 then isEmpty = false end
+            else
+                isEmpty = false
+            end
+        else
+            isEmpty = false
+        end
+        
+        if isEmpty then
+            addLine("Error: No se pudo extraer código de esta URL -> " .. url, C.CON_ERR, "err", ICO.error)
+            pcall(delfolder, savedDir)
+        else
+            addLine("Guardado en: " .. savedDir, C.CON_SYS, "info", ICO.info)
+            addLine("Proceso finalizado", C.CON_OK, "ok", ICO.check)
+        end
         
         silentCleanup()
         setUIState(false)
@@ -716,15 +649,12 @@ local function exec(input)
     if lowerUrl:find("squareweb", 1, true) or lowerUrl:find("v3ntauth", 1, true) or lowerUrl:find("webproxy", 1, true) then
         addLine("SquareWeb detectado", C.CON_SYS, "info", ICO.info)
         runExtractor("squarweb_extractor", URL_EXTRACTOR_SQUAREWEB, input, parsedHost, url)
-        
     elseif lowerUrl:find("luamor", 1, true) or lowerUrl:find("superflow", 1, true) then
         addLine("Luamor detectado", C.CON_SYS, "info", ICO.info)
         runExtractor("luamor_extractor", URL_EXTRACTOR_LUAMOR, input, parsedHost, url)
-        
     elseif lowerUrl:find("goofyscator", 1, true) or lowerUrl:find("railway.app", 1, true) then
         addLine("Goofyscator detectado. Usando generic...", C.CON_SYS, "info", ICO.info)
         runExtractor("generic_extractor", URL_EXTRACTOR_GENERIC, input, parsedHost, url)
-        
     else
         addLine("Dominio desconocido. Usando generic...", C.CON_SYS, "info", ICO.info)
         runExtractor("generic_extractor", URL_EXTRACTOR_GENERIC, input, parsedHost, url)
@@ -935,6 +865,43 @@ connections[#connections + 1] = UIS.InputBegan:Connect(function(inp, gp)
         if not CLOSED and WIN and WIN.Parent then
             if WIN.Visible then hideWindow() else showWindow() end
         end
+    end
+end)
+
+local guardLoaded = false
+task.spawn(function()
+    getgenv().isInternalFetch = true
+    local code = fetch(URL_SECURITY_GUARD, "sec_guard")
+    getgenv().isInternalFetch = false
+
+    if code then
+        local fn = loadstring(code)
+        if fn then
+            local ok, guard = pcall(fn)
+            if ok and type(guard) == "table" then
+                guardLoaded = true
+                shieldIco.Visible = true
+                addLine("Guard v5 Activado (En vivo)", C.CON_OK, "ok", ICO.shield, true)
+                
+                if guard.OnLog then
+                    guard.OnLog(function(log)
+                        local color = C.CON_ERR
+                        if log.Level == "WARN" then color = C.CON_WARN or Color3.fromRGB(255, 200, 50) end
+                        if log.Level == "INFO" then color = C.CON_SYS end
+                        
+                        local icon = "shield"
+                        if log.Level == "WARN" then icon = "alert-triangle" end
+                        if log.Level == "INFO" then icon = "info" end
+                        
+                        addLine("[Guard] " .. log.Message, color, "info", icon)
+                    end)
+                end
+            end
+        end
+    end
+    
+    if not guardLoaded then
+        addLine("Security Guard no disponible", C.CON_WARN, "warn", ICO.warn, true)
     end
 end)
 
