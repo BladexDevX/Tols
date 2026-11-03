@@ -1,0 +1,73 @@
+-- BLADEX SECURITY GUARD
+local Players = game:GetService("Players")
+local HttpService = game:GetService("HttpService")
+local LP = Players.LocalPlayer
+
+local BLOCK = {"webhook", "discord", "iplogger", "grabify", "ipify", "ip-api", "ipinfo", "sentry"}
+local FAKE_STR = '{"status":"ok","success":true,"id":123456}'
+local FAKE_TBL = {Success = true, StatusCode = 200, Body = FAKE_STR, Headers = {}}
+
+-- 1. Spoof IDs & Cuenta
+local oldIndex
+oldIndex = hookmetamethod(game, "__index", function(self, key)
+    if not checkcaller() and type(key) == "string" then
+        if self == game then
+            if key == "PlaceId" or key == "GameId" then return 1818 end
+            if key == "JobId" then return "00000000-0000-0000-0000-000000000000" end
+            if key == "CreatorId" then return 1 end -- Spoof Creator
+        elseif self == LP then
+            if key == "UserId" then return 1 end
+            if key == "Name" or key == "DisplayName" then return "Player" end
+            if key == "AccountAge" then return 1000 end -- Spoof Age
+            if key == "MembershipType" then return Enum.MembershipType.None end
+        end
+    end
+    return oldIndex(self, key)
+end)
+
+-- 2. Helper de Bloqueo
+local function isBlocked(url)
+    if type(url) ~= "string" then return false end
+    local lowUrl = string.lower(url)
+    for i = 1, #BLOCK do
+        if string.find(lowUrl, BLOCK[i], 1, true) then return true end
+    end
+    return false
+end
+
+-- 3. Hook HTTP Métodos (HttpGet, HttpService)
+local oldNamecall
+oldNamecall = hookmetamethod(game, "__namecall", function(self, ...)
+    local m = getnamecallmethod()
+    
+    if not checkcaller() then
+        local a1 = ...
+        local url = type(a1) == "string" and a1 or (type(a1) == "table" and type(a1.Url) == "string" and a1.Url)
+        
+        if url and isBlocked(url) then
+            -- HttpGet devuelve String, RequestAsync devuelve Tabla
+            if m == "HttpGet" or m == "HttpGetAsync" or m == "GetAsync" then
+                return FAKE_STR
+            elseif m == "RequestAsync" or m == "PostAsync" then
+                return FAKE_TBL
+            end
+        end
+    end
+    return oldNamecall(self, ...)
+end)
+
+-- 4. Hook Global Functions (request, syn.request, http_request)
+local genv = getgenv and getgenv() or _G
+local oldRequest = genv.request or genv.http_request or genv.http
+if oldRequest then
+    genv.request = function(options)
+        if not checkcaller() and type(options) == "table" and isBlocked(options.Url) then
+            return FAKE_TBL
+        end
+        return oldRequest(options)
+    end
+    genv.http_request = genv.request -- Alias para compatibilidad
+end
+
+print("[Bladex] Security Guard")
+return true
