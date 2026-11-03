@@ -45,6 +45,8 @@ local CFG = {
     BlockObfuscatedQueue = false,
     TaintOnSuspect = true,
     TaintWindow = 12,
+    InternalFetch = true,
+    InternalMax = 20,
     AntiKick = true,
     Watchdog = true,
     RestoreTampered = true,
@@ -133,6 +135,7 @@ local ROBLOX_SENSITIVE = set({
     "passwordreset.roblox.com", "apis.roblox.com",
 })
 local ROBLOX_ALL = set({ "roblox.com", "rbxcdn.com" })
+local ROBLOX_SOFT = set({ "apis.roblox.com" })
 local ROBLOX_SENSITIVE_PATHS = {
     "/my/settings/json", "/mobileapi/userinfo", "/game/getcurrentuser", "/my/account",
     "/v1/users/authenticated", "/v2/users/authenticated", "/v2/logout", "/v1/account/pin",
@@ -419,7 +422,7 @@ local function taint(seconds)
     if t > taintUntil then taintUntil = t end
 end
 
-local function judge(u, outbound, idHit)
+local function judge(u, outbound, idHit, lenient)
     local host, path, port = parseUrl(u)
     if host == "" then return true, "host-vacio" end
     if hostIn(host, UserBlock) then return true, "bloqueado-usuario" end
@@ -433,7 +436,9 @@ local function judge(u, outbound, idHit)
     if s_find(host, "[\128-\255]") or s_find(host, "xn--", 1, true) then return true, "host-unicode" end
     if not s_find(host, ".", 1, true) then return true, "host-sin-dominio" end
     if hostIn(host, HARD_HOSTS) then return true, "host-malicioso" end
-    if hostIn(host, ROBLOX_SENSITIVE) then return true, "api-roblox-sensible" end
+    if hostIn(host, ROBLOX_SENSITIVE) and not (lenient and hostIn(host, ROBLOX_SOFT)) then
+        return true, "api-roblox-sensible"
+    end
     if hostIn(host, ROBLOX_ALL) then
         for i = 1, #ROBLOX_SENSITIVE_PATHS do
             if s_find(path, ROBLOX_SENSITIVE_PATHS[i], 1, true) then return true, "api-roblox-sensible" end
@@ -444,7 +449,7 @@ local function judge(u, outbound, idHit)
     if not trusted then
         if CFG.BlockDnsExfil and dnsSuspicious(host) then return true, "dns-exfil" end
         if outbound and port and port ~= "80" and port ~= "443" then return true, "puerto-inusual" end
-        if idHit or identInUrl(host, path) then return true, "identidad-saliente" end
+        if idHit or (not lenient and identInUrl(host, path)) then return true, "identidad-saliente" end
     end
     if outbound then
         for i = 1, #OUTBOUND_PATHS do
@@ -459,7 +464,7 @@ local function judge(u, outbound, idHit)
     return false
 end
 
-local function evaluate(url, method, body, headers)
+local function evaluate(url, method, body, headers, internal)
     if url == nil then return false end
     if type(url) ~= "string" then return true, "url-invalida" end
     if #url > CFG.MaxUrl then return true, "url-enorme" end
@@ -469,6 +474,7 @@ local function evaluate(url, method, body, headers)
 
     method = s_upper(method or "GET")
     local outbound = (method ~= "GET" and method ~= "HEAD") or (body ~= nil and body ~= "")
+    local lenient = internal == true and not outbound
 
     local raw = cleanUrl(url)
     if body and #body > CFG.MaxBody and not hostIn((parseUrl(raw)), UserAllow) then
@@ -493,10 +499,10 @@ local function evaluate(url, method, body, headers)
     end
 
     local decoded = cleanUrl(percentDecode(url))
-    local blocked, reason = judge(raw, outbound, idHit)
+    local blocked, reason = judge(raw, outbound, idHit, lenient)
     if blocked then return true, reason end
     if decoded ~= raw then
-        blocked, reason = judge(decoded, outbound, idHit)
+        blocked, reason = judge(decoded, outbound, idHit, lenient)
         if blocked then return true, reason end
     end
     return false
@@ -566,8 +572,27 @@ local function record(source, url, method, reason, warnOnly, detail)
     emit(source, safe, reason, warnOnly, detail)
 end
 
+-- Bandera de peticion interna: acotada en tiempo y solo relaja GET sin cuerpo
+local internalSince, internalSeen = nil, 0
+local function internalActive()
+    if not CFG.InternalFetch or rawget(genv, "isInternalFetch") ~= true then
+        internalSince = nil
+        return false
+    end
+    local now = os_clock()
+    if not internalSince or now - internalSeen > 5 then internalSince = now end
+    internalSeen = now
+    if now - internalSince > CFG.InternalMax then
+        pcall(function() genv.isInternalFetch = false end)
+        internalSince = nil
+        record("guard", "isInternalFetch", "FLAG", "bandera-interna-expirada")
+        return false
+    end
+    return true
+end
+
 local function inspect(source, url, method, body, headers)
-    local ok, blocked, reason = pcall(evaluate, url, method, body, headers)
+    local ok, blocked, reason = pcall(evaluate, url, method, body, headers, internalActive())
     if not ok then
         blocked, reason = CFG.FailClosed, "error-interno"
     end
@@ -593,6 +618,7 @@ local NET_M = {
     HttpGet = true, HttpGetAsync = true, GetAsync = true,
     HttpPost = true, HttpPostAsync = true, PostAsync = true, RequestAsync = true,
 }
+local DANGEROUS_M = { Kick = true, kick = true, Kill = true, FireTouchInterest = true }
 local PURCHASE_M = {
     PromptPurchase = true, PromptGamePassPurchase = true, PromptBundlePurchase = true,
     PromptProductPurchase = true, PromptPremiumPurchase = true, PromptRobuxPurchase = true,
@@ -621,11 +647,44 @@ local function isNetTarget(self)
     return cn == "HttpService" or cn == "HttpRbxApiService"
 end
 
+-- Hook de metatabla: desbloquea si es readonly, aplica, vuelve a bloquear
+local function hookMeta(key, handler)
+    local mt
+    if getrawmetatable then
+        local ok, r = pcall(getrawmetatable, game)
+        if ok and type(r) == "table" then mt = r end
+    end
+    local wasRO = false
+    if mt and isreadonly then
+        local ok, r = pcall(isreadonly, mt)
+        wasRO = ok and r == true
+    end
+    if wasRO and setreadonly then pcall(setreadonly, mt, false) end
+    local old
+    if hookmetamethod then
+        local ok, res = pcall(hookmetamethod, game, key, handler)
+        if ok then old = res end
+    end
+    if old == nil and mt then
+        old = rawget(mt, key)
+        if not pcall(function() mt[key] = handler end) then old = nil end
+    end
+    if wasRO and setreadonly then pcall(setreadonly, mt, true) end
+    if old == nil then warn("[Bladex Guard] no se pudo hookear " .. key) end
+    return old
+end
+
 local oldNamecall
-oldNamecall = hookmetamethod(game, "__namecall", mark(newcc(function(self, ...)
+oldNamecall = hookMeta("__namecall", mark(newcc(function(self, ...)
     local m = getnamecallmethod()
 
-    if NET_M[m] then
+    if m == "RequestInternal" then
+        if cancall and checkcaller() and isNetTarget(self) then
+            local a = t_pack(...)
+            record(m, type(a[1]) == "table" and field(snapshot(a[1], 0), "Url") or "?", "REQ", "request-interno")
+            return fakeResponse()
+        end
+    elseif NET_M[m] then
         if isNetTarget(self) then
             local a = t_pack(...)
             local blocked, kind = inspectNet(m, a)
@@ -643,8 +702,12 @@ oldNamecall = hookmetamethod(game, "__namecall", mark(newcc(function(self, ...)
             record(m, "marketplace", "CALL", "compra-bloqueada")
             return
         end
-    elseif m == "Kick" or m == "kick" then
-        if CFG.AntiKick and self == LP and cancall and not checkcaller() then return end
+    elseif DANGEROUS_M[m] then
+        -- solo bloquea si lo dispara un script externo (no tu entorno)
+        if CFG.AntiKick and cancall and not checkcaller() and (self == LP or (m ~= "Kick" and m ~= "kick")) then
+            record(m, "local", "CALL", "funcion-danina-bloqueada")
+            return
+        end
     end
 
     if setnamecallmethod then setnamecallmethod(m) end
@@ -653,9 +716,14 @@ end)))
 
 local S = CFG.Spoof
 local oldIndex
-oldIndex = hookmetamethod(game, "__index", mark(newcc(function(self, key)
+oldIndex = hookMeta("__index", mark(newcc(function(self, key)
     if type(key) == "string" then
-        if NET_M[key] and isNetTarget(self) then
+        if key == "RequestInternal" and cancall and checkcaller() and isNetTarget(self) then
+            return mark(newcc(function(_, opts)
+                record(key, type(opts) == "table" and field(snapshot(opts, 0), "Url") or "?", "REQ", "request-interno")
+                return fakeResponse()
+            end))
+        elseif NET_M[key] and isNetTarget(self) then
             local real = oldIndex(self, key)
             if type(real) == "function" then
                 return mark(newcc(function(s, ...)
@@ -1153,10 +1221,7 @@ if CFG.Watchdog then
                     record("watchdog", e.name, "CHANGE", "manipulacion-detectada")
                     taint(CFG.TaintWindow)
                     if CFG.RestoreTampered and e.kind == "global" then
-                        pcall(function()
-                            if setreadonly then pcall(setreadonly, e.parent, false) end
-                            e.parent[e.key] = e.value
-                        end)
+                        safeSet(e.parent, e.key, e.value)
                     else
                         e.value = current
                     end
@@ -1166,5 +1231,5 @@ if CFG.Watchdog then
     end)
 end
 
-print("[Bladex] Security Guard v3 activo")
+print("[Bladex] Security Guard v4 activo")
 return Guard
