@@ -1,15 +1,5 @@
---[[
-    BLADEX Security Guard v3
-    - Bloquea exfiltracion (webhooks, IP loggers, cookie, identidad, DNS exfil)
-    - Detecta codigo OFUSCADO en loadstring / queue_on_teleport (score + motivos)
-    - Ventana "taint": tras cargar codigo ofuscado/hostil, endurece salidas de red
-    - Snapshot de argumentos (anti TOCTOU / metatablas / claves duplicadas)
-    - Anti pre-poisoning, anti padding, anti hook-sobre-hook, funciones nativas aliasadas
-]]
-
 local genv = (getgenv and getgenv()) or _G
 
--- ===== Alias nativos (evita que otro script reemplace globals/string.* despues) =====
 local type, typeof, pcall, pairs, ipairs, next = type, typeof, pcall, pairs, ipairs, next
 local tostring, tonumber, setmetatable, getmetatable = tostring, tonumber, setmetatable, getmetatable
 local rawget, error = rawget, error
@@ -21,7 +11,6 @@ local m_floor, m_log, m_random = math.floor, math.log, math.random
 local os_clock = os.clock
 local t_clone = table.clone or function(t) local c = {} for k, v in next, t do c[k] = v end return c end
 
--- ===== Anti pre-poisoning: un guard falso no debe impedir la instalacion real =====
 do
     local existing = rawget(genv, "__BLADEX_GUARD")
     if existing ~= nil then
@@ -50,15 +39,15 @@ local CFG = {
     ProtectInternals = true,
     ScanLoadstring = true,
     DetectObfuscation = true,
-    BlockHostileLoad = false,       -- true = bloquea loadstring con webhook/cookie en texto
-    BlockObfuscatedLoad = false,    -- true = bloquea loadstring ofuscado (rompe scripts legitimos protegidos)
+    BlockHostileLoad = false,
+    BlockObfuscatedLoad = false,
     BlockHostileQueue = true,
     BlockObfuscatedQueue = false,
-    TaintOnSuspect = true,          -- tambien "sospechoso" activa la ventana taint
-    TaintWindow = 12,               -- segundos de salida endurecida tras codigo ofuscado
+    TaintOnSuspect = true,
+    TaintWindow = 12,
     AntiKick = true,
     Watchdog = true,
-    RestoreTampered = true,         -- restaura globals pisados (hooks de metatable solo se reportan)
+    RestoreTampered = true,
     MaxLog = 200,
     MaxBody = 262144,
     MaxUrl = 8192,
@@ -96,7 +85,6 @@ local Players = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
 local LP = Players.LocalPlayer
 
--- ===== Identidad =====
 local IDENT = {}
 local COMMON = set({
     "true", "false", "null", "none", "nil", "user", "name", "test", "game",
@@ -124,7 +112,6 @@ for _, fname in ipairs({ "gethwid", "get_hwid" }) do
     end
 end
 
--- ===== Listas =====
 local HARD_HOSTS = set({
     "webhook.site", "requestbin.com", "requestbin.net", "pipedream.net",
     "hookb.in", "beeceptor.com", "requestcatcher.com", "canarytokens.com",
@@ -197,7 +184,6 @@ for i = 1, #HOST_NEEDLES do HOSTILE_NEEDLES[#HOSTILE_NEEDLES + 1] = HOST_NEEDLES
 
 local UserAllow, UserBlock, UserWebhooks = {}, {}, {}
 
--- ===== Decodificadores =====
 local B64 = {}
 do
     local alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -244,7 +230,6 @@ local function unescapeJson(s)
     end))
 end
 
--- Normaliza trucos de codigo Lua: "\104\116", "\x68", string.char(104,...), "a".."b"
 local function luaNormalize(s)
     s = s_gsub(s, "[Cc]har%s*%(([%d%s,]+)%)", function(args)
         local t = {}
@@ -267,7 +252,6 @@ local function luaNormalize(s)
     return s
 end
 
--- Devuelve variantes en minuscula (texto, b64 en 4 alineaciones, hex, escapes Lua). Con presupuesto.
 local function expand(text, budget)
     local out = {}
     if type(text) ~= "string" or text == "" then return out end
@@ -318,7 +302,6 @@ local function hasAny(variants, needles)
     return false
 end
 
--- ===== URL =====
 local function cleanUrl(u)
     u = s_gsub(u, "[%c%s]", "")
     u = s_gsub(u, "\\", "/")
@@ -409,7 +392,6 @@ local function headersToString(h)
     return t_concat(parts, "\n"), false
 end
 
--- Copia cruda (sin metametodos): lo que se inspecciona es EXACTAMENTE lo que se envia
 local function snapshot(t, depth)
     local c = {}
     for k, v in next, t do
@@ -431,7 +413,6 @@ local function ambiguous(t)
     return false
 end
 
--- ===== Taint (ventana tras codigo ofuscado/hostil) =====
 local taintUntil = 0
 local function taint(seconds)
     local t = os_clock() + seconds
@@ -532,7 +513,6 @@ local function scanPayload(data, checkIdentity)
     return false
 end
 
--- ===== Log / avisos =====
 local Log = {}
 local Stats = { total = 0, reasons = {} }
 local lastWarn, lastWarnCount, lastNotify = {}, 0, 0
@@ -595,7 +575,6 @@ local function inspect(source, url, method, body, headers)
     return blocked
 end
 
--- Inspecciona una tabla de opciones ya clonada
 local function inspectOpts(source, snap)
     if ambiguous(snap) then
         record(source, field(snap, "Url"), "REQ", "args-ambiguos")
@@ -608,7 +587,6 @@ local function fakeResponse()
     return { Success = true, StatusCode = 200, StatusMessage = "OK", Body = '{"status":"ok"}', Headers = {} }
 end
 
--- ===== Hooks de red (Instance) =====
 local GET_M = { HttpGet = true, HttpGetAsync = true, GetAsync = true }
 local POST_M = { HttpPost = true, HttpPostAsync = true, PostAsync = true }
 local NET_M = {
@@ -621,7 +599,6 @@ local PURCHASE_M = {
     PromptSubscriptionPurchase = true, PromptNativePurchase = true,
 }
 
--- Modifica `a` (args empacados) para que lleve copias crudas; devuelve blocked, kind
 local function inspectNet(m, a)
     if GET_M[m] then
         if type(a[3]) == "table" then a[3] = snapshot(a[3], 0) end
@@ -708,7 +685,6 @@ oldIndex = hookmetamethod(game, "__index", mark(newcc(function(self, key)
     return oldIndex(self, key)
 end)))
 
--- ===== Baselines (watchdog) =====
 local Baselines = {}
 
 local function watch(parent, key, name, kind)
@@ -722,6 +698,35 @@ local function resolve(path)
         parent, last, cur = cur, part, cur[part]
     end
     return parent, last, cur
+end
+
+local function safeSet(parent, key, value)
+    if pcall(function() parent[key] = value end) and parent[key] == value then return true end
+    if setreadonly then
+        local okRO, wasRO = true, true
+        if isreadonly then okRO, wasRO = pcall(isreadonly, parent) end
+        pcall(setreadonly, parent, false)
+        local ok = pcall(function() parent[key] = value end)
+        if okRO and wasRO then pcall(setreadonly, parent, true) end
+        if ok and parent[key] == value then return true end
+    end
+    return false
+end
+
+local function install(parent, key, fn, make)
+    if safeSet(parent, key, mark(newcc(make(fn)))) then return true end
+    if hookfn then
+        local holder
+        local w2 = mark(newcc(make(function(...) return holder(...) end)))
+        local ok, res = pcall(hookfn, fn, w2)
+        if ok and res then
+            holder = res
+            hooked[fn] = true
+            return true
+        end
+    end
+    warn("[Bladex Guard] no se pudo instalar hook en " .. tostring(key))
+    return false
 end
 
 local function hookRequest(path)
@@ -747,7 +752,10 @@ local function hookRequest(path)
     end
     if not done then
         old = fn
-        parent[last] = wrapper
+        if not safeSet(parent, last, wrapper) then
+            warn("[Bladex Guard] no se pudo proteger " .. path)
+            return
+        end
     end
     watch(parent, last, path)
 end
@@ -785,18 +793,17 @@ end
 
 for _, name in ipairs({ "request_internal", "RequestInternal" }) do
     if type(genv[name]) == "function" then
-        genv[name] = mark(newcc(function(opts, ...)
+        safeSet(genv, name, mark(newcc(function(opts, ...)
             if type(opts) == "table" then
                 local snap = snapshot(opts, 0)
                 record(name, field(snap, "Url") or "?", field(snap, "Method") or "GET", "request-interno")
             end
             return fakeResponse()
-        end))
+        end)))
         watch(genv, name, name)
     end
 end
 
--- ===== WebSocket =====
 local function wrapSocket(sock, trusted, path)
     if not CFG.WrapWebSocket then return sock end
     local t = type(sock)
@@ -825,27 +832,27 @@ if CFG.BlockWebSocket then
     for _, path in ipairs({ "WebSocket.connect", "WebSocket.Connect", "syn.websocket.connect" }) do
         local parent, last, fn = resolve(path)
         if type(fn) == "function" then
-            parent[last] = mark(newcc(function(url, ...)
-                if inspect(path, url, "WS", "x") then
-                    error("[Bladex Guard] conexion WebSocket bloqueada", 2)
+            local installed = install(parent, last, fn, function(orig)
+                return function(url, ...)
+                    if inspect(path, url, "WS", "x") then
+                        error("[Bladex Guard] conexion WebSocket bloqueada", 2)
+                    end
+                    local sock = orig(url, ...)
+                    local trusted = true
+                    if type(url) == "string" then
+                        local host = parseUrl(cleanUrl(url))
+                        trusted = hostIn(host, UserAllow) ~= nil or hostIn(host, TRUSTED_HOSTS) ~= nil
+                    end
+                    return wrapSocket(sock, trusted, path)
                 end
-                local sock = fn(url, ...)
-                local trusted = true
-                if type(url) == "string" then
-                    local host = parseUrl(cleanUrl(url))
-                    trusted = hostIn(host, UserAllow) ~= nil or hostIn(host, TRUSTED_HOSTS) ~= nil
-                end
-                return wrapSocket(sock, trusted, path)
-            end))
-            watch(parent, last, path)
+            end)
+            if installed then watch(parent, last, path) end
         end
     end
 end
 
--- ===== Analisis de codigo: hostil + ofuscacion =====
 local CHUNK = 262144
 
--- Escaneo por trozos con solapamiento: sin limite de tamano que permita "padding"
 local function deepHostile(code)
     local n = #code
     if n > CFG.MaxScan then return false, true end
@@ -887,7 +894,6 @@ local function entropy(s)
     return e
 end
 
--- Devuelve verdict ("limpio"|"sospechoso"|"ofuscado"), score, motivos
 local function analyzeObfuscation(code)
     local sample = code
     if #code > 60000 then
@@ -936,7 +942,6 @@ local function analyzeObfuscation(code)
     return verdict, score, why
 end
 
--- Analiza codigo; devuelve bloquear(bool)
 local function inspectCode(source, code, blockHostile, blockObf)
     local ok, hostile, incomplete = pcall(deepHostile, code)
     if not ok then hostile, incomplete = false, true end
@@ -976,13 +981,15 @@ for _, path in ipairs({ "queue_on_teleport", "queueonteleport", "syn.queue_on_te
     local parent, last, fn = resolve(path)
     if type(fn) == "function" then
         origQueue = origQueue or fn
-        parent[last] = mark(newcc(function(code, ...)
-            if type(code) == "string" and inspectCode(path, code, CFG.BlockHostileQueue, CFG.BlockObfuscatedQueue) then
-                return
+        local installed = install(parent, last, fn, function(orig)
+            return function(code, ...)
+                if type(code) == "string" and inspectCode(path, code, CFG.BlockHostileQueue, CFG.BlockObfuscatedQueue) then
+                    return
+                end
+                return orig(code, ...)
             end
-            return fn(code, ...)
-        end))
-        watch(parent, last, path)
+        end)
+        if installed then watch(parent, last, path) end
     end
 end
 
@@ -999,13 +1006,13 @@ if CFG.ProtectFiles then
     for _, name in ipairs({ "writefile", "appendfile" }) do
         local orig = genv[name]
         if type(orig) == "function" then
-            genv[name] = mark(newcc(function(path, ...)
+            safeSet(genv, name, mark(newcc(function(path, ...)
                 if CFG.ProtectFiles and pathIsDangerous(path) then
                     record(name, tostring(path), "WRITE", "persistencia-bloqueada")
                     return
                 end
                 return orig(path, ...)
-            end))
+            end)))
             watch(genv, name, name)
         end
     end
@@ -1014,37 +1021,36 @@ end
 for _, lname in ipairs({ "loadstring", "load" }) do
     local origLoad = genv[lname] or (lname == "loadstring" and loadstring) or nil
     if CFG.ScanLoadstring and type(origLoad) == "function" then
-        genv[lname] = mark(newcc(function(code, ...)
+        safeSet(genv, lname, mark(newcc(function(code, ...)
             if CFG.ScanLoadstring and type(code) == "string" then
                 if inspectCode(lname, code, CFG.BlockHostileLoad, CFG.BlockObfuscatedLoad) then
                     return nil, "bloqueado por Bladex Guard"
                 end
             end
             return origLoad(code, ...)
-        end))
+        end)))
         watch(genv, lname, lname)
     end
 end
 
--- ===== Proteccion de los propios hooks =====
 if type(genv.restorefunction) == "function" then
     local origRestore = genv.restorefunction
-    genv.restorefunction = mark(newcc(function(f, ...)
+    safeSet(genv, "restorefunction", mark(newcc(function(f, ...)
         if protected(f) then return end
         return origRestore(f, ...)
-    end))
+    end)))
 end
 
 for _, name in ipairs({ "hookfunction", "hookfunc", "replaceclosure" }) do
     local orig = genv[name]
     if type(orig) == "function" then
-        genv[name] = mark(newcc(function(target, ...)
+        safeSet(genv, name, mark(newcc(function(target, ...)
             if type(target) == "function" and protected(target) then
                 record(name, "hook-guard", "HOOK", "hook-bloqueado")
                 return target
             end
             return orig(target, ...)
-        end))
+        end)))
         watch(genv, name, name)
     end
 end
@@ -1091,7 +1097,6 @@ if CFG.ProtectInternals then
     guardIntrospection(genv)
 end
 
--- ===== Guard publico (se arma antes del watchdog para vigilarlo) =====
 local function copyStats()
     local r = {}
     for k, v in pairs(Stats.reasons) do r[k] = v end
@@ -1111,7 +1116,7 @@ local Guard = {
         local ok, blocked, reason = pcall(evaluate, url, method, body, headers)
         return ok and blocked or false, reason
     end,
-    -- Analisis manual: Guard.Analyze(codigo) -> "limpio"|"sospechoso"|"ofuscado", score, motivos
+
     Analyze = function(code)
         if type(code) ~= "string" then return "limpio", 0, {} end
         return analyzeObfuscation(code)
@@ -1135,10 +1140,9 @@ local locked = setmetatable({}, {
     __newindex = function() end,
     __metatable = "locked",
 })
-genv.__BLADEX_GUARD = locked
+if not safeSet(genv, "__BLADEX_GUARD", locked) then warn("[Bladex Guard] no se pudo publicar el marcador") end
 watch(genv, "__BLADEX_GUARD", "__BLADEX_GUARD")
 
--- ===== Watchdog =====
 if CFG.Watchdog then
     task.spawn(function()
         while true do
