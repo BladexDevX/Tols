@@ -1,1235 +1,633 @@
+--v1
 local genv = (getgenv and getgenv()) or _G
+if type(genv.BladexGuard) == "table" and genv.BladexGuard.Loaded then return genv.BladexGuard end
 
-local type, typeof, pcall, pairs, ipairs, next = type, typeof, pcall, pairs, ipairs, next
-local tostring, tonumber, setmetatable, getmetatable = tostring, tonumber, setmetatable, getmetatable
-local rawget, error = rawget, error
-local s_lower, s_upper, s_find, s_char, s_sub = string.lower, string.upper, string.find, string.char, string.sub
-local s_gsub, s_match, s_gmatch, s_byte, s_format, s_rep = string.gsub, string.match, string.gmatch, string.byte, string.format, string.rep
-local s_reverse = string.reverse
-local t_concat, t_insert, t_remove, t_pack, t_unpack = table.concat, table.insert, table.remove, table.pack, table.unpack
-local m_floor, m_log, m_random = math.floor, math.log, math.random
-local os_clock = os.clock
-local t_clone = table.clone or function(t) local c = {} for k, v in next, t do c[k] = v end return c end
+local cloneref = cloneref or function(x) return x end
+local newcclosure = newcclosure or function(f) return f end
+local hookfunction = hookfunction or hookfunc
+local getrawmetatable = getrawmetatable or debug.getmetatable
+local isreadonly = isreadonly or function() return false end
+local setreadonly = setreadonly or function(t, v)
+	if v and make_readonly then make_readonly(t) elseif (not v) and make_writeable then make_writeable(t) end
+end
+local getnamecallmethod, setnamecallmethod = getnamecallmethod, (setnamecallmethod or function() end)
+assert(getrawmetatable and getnamecallmethod, "BLADEX Guard: executor no soportado")
 
+local sfind, slower, ssub, sgsub, sgmatch, smatch = string.find, string.lower, string.sub, string.gsub, string.gmatch, string.match
+local schar, sbyte, sreverse = string.char, string.byte, string.reverse
+local bxor = bit32 and bit32.bxor
+
+local Players = cloneref(game:GetService("Players"))
+local StarterGui = cloneref(game:GetService("StarterGui"))
+local LocalPlayer = Players.LocalPlayer
+while not LocalPlayer do task.wait() LocalPlayer = Players.LocalPlayer end
+
+local Config = {
+	MaxLogs = 500,
+	Notify = true,
+	NetMode = "filter",
+	StrictAllowlist = false,
+	AllowHosts = { "raw.githubusercontent.com", "github.com", "api.github.com" },
+	ObfMode = "block",
+	EntropyThreshold = 5.85,
+	EntropyMinLen = 1500,
+	PhysicalMode = "block",
+	Watchdog = true,
+}
 do
-    local existing = rawget(genv, "__BLADEX_GUARD")
-    if existing ~= nil then
-        local alive = false
-        if getmetatable(existing) == "locked" then
-            local ok, res = pcall(function() return game:HttpGet("http://localhost./__bladex_probe") end)
-            alive = ok and res == ""
-        end
-        if alive then return existing end
-        warn("[Bladex Guard] guard previo ausente o falso, reinstalando")
-    end
+	local u = genv.BladexGuardConfig
+	if type(u) == "table" then
+		for k in pairs(Config) do if u[k] ~= nil then Config[k] = u[k] end end
+	end
 end
 
-local CFG = {
-    Debug = true,
-    Notify = true,
-    Strict = false,
-    IdentityGuard = true,
-    FailClosed = true,
-    BlockIPHosts = true,
-    BlockDnsExfil = true,
-    BlockWebSocket = true,
-    WrapWebSocket = true,
-    BlockPurchasePrompts = true,
-    ProtectFiles = true,
-    ProtectInternals = true,
-    ScanLoadstring = true,
-    DetectObfuscation = true,
-    BlockHostileLoad = false,
-    BlockObfuscatedLoad = false,
-    BlockHostileQueue = true,
-    BlockObfuscatedQueue = false,
-    TaintOnSuspect = true,
-    TaintWindow = 12,
-    InternalFetch = true,
-    InternalMax = 20,
-    AntiKick = true,
-    Watchdog = true,
-    RestoreTampered = true,
-    MaxLog = 200,
-    MaxBody = 262144,
-    MaxUrl = 8192,
-    MaxScan = 8000000,
-    DecodeBudget = 1500000,
-    Spoof = {
-        Enabled = false, PlaceId = false, GameId = false, JobId = false,
-        UserId = false, Name = false, AccountAge = false,
-    },
+local COLORS = {
+	BLOCK = Color3.fromRGB(255, 70, 70),
+	WARN = Color3.fromRGB(255, 200, 50),
+	INFO = Color3.fromRGB(120, 200, 255),
 }
+local Logs, Listeners, LogId = {}, {}, 0
+local Stats = { BLOCK = 0, WARN = 0, INFO = 0, ByCategory = {} }
+local lastNotify = {}
 
-local newcc = newcclosure or function(f) return f end
-local cancall = type(checkcaller) == "function"
-local hookfn = genv.hookfunction
-
-local function set(list)
-    local s = {}
-    for _, v in ipairs(list) do s[s_lower(v)] = true end
-    return s
+local function Log(level, category, message, detail)
+	LogId += 1
+	local e = {
+		Id = LogId, Time = os.time(), Level = level, Category = category,
+		Message = message, Detail = detail and ssub(tostring(detail), 1, 300) or nil,
+		Color = COLORS[level] or COLORS.INFO,
+	}
+	Logs[#Logs + 1] = e
+	if #Logs > Config.MaxLogs then table.remove(Logs, 1) end
+	Stats[level] = (Stats[level] or 0) + 1
+	Stats.ByCategory[category] = (Stats.ByCategory[category] or 0) + 1
+	for _, cb in ipairs(Listeners) do task.spawn(pcall, cb, e) end
+	if Config.Notify and level ~= "INFO" then
+		local now = os.clock()
+		if not lastNotify[category] or now - lastNotify[category] > 3 then
+			lastNotify[category] = now
+			task.defer(pcall, function()
+				StarterGui:SetCore("SendNotification", {
+					Title = "BLADEX Guard [" .. level .. "]", Text = ssub(message, 1, 90), Duration = 4,
+				})
+			end)
+		end
+	end
 end
 
-local ours = setmetatable({}, { __mode = "k" })
-local hooked = {}
-
-local function mark(f)
-    ours[f] = true
-    return f
-end
-
-local function protected(f)
-    return ours[f] == true or hooked[f] == true
-end
-
-local Players = game:GetService("Players")
-local StarterGui = game:GetService("StarterGui")
-local LP = Players.LocalPlayer
-
-local IDENT = {}
-local COMMON = set({
-    "true", "false", "null", "none", "nil", "user", "name", "test", "game",
-    "roblox", "player", "guest", "admin",
-})
-
-local function addIdent(v, minLen)
-    if v == nil then return end
-    v = s_lower(tostring(v))
-    if #v >= minLen and not COMMON[v] then IDENT[#IDENT + 1] = v end
-end
-
-pcall(function()
-    addIdent(LP.Name, 4)
-    addIdent(LP.DisplayName, 4)
-    addIdent(LP.UserId, 6)
-end)
-pcall(function()
-    addIdent(game:GetService("RbxAnalyticsService"):GetClientId(), 8)
-end)
-for _, fname in ipairs({ "gethwid", "get_hwid" }) do
-    local f = genv[fname]
-    if type(f) == "function" then
-        pcall(function() addIdent(f(), 8) end)
-    end
-end
-
-local HARD_HOSTS = set({
-    "webhook.site", "requestbin.com", "requestbin.net", "pipedream.net",
-    "hookb.in", "beeceptor.com", "requestcatcher.com", "canarytokens.com",
-    "iplogger.org", "iplogger.com", "iplogger.ru", "grabify.link", "2no.co",
-    "yip.su", "leancoding.co", "stopify.co", "ipgrabber.ru", "blasze.tk",
-    "ipify.org", "ip-api.com", "ipinfo.io", "ipwhois.app", "ifconfig.me",
-    "icanhazip.com", "checkip.amazonaws.com", "myip.com", "whatismyip.com",
-    "hooks.slack.com", "api.telegram.org", "ngrok.io", "ngrok-free.app",
-    "ngrok.app", "trycloudflare.com", "serveo.net", "localtunnel.me", "loca.lt",
-    "bit.ly", "tinyurl.com", "t.co", "is.gd", "v.gd", "cutt.ly", "rebrand.ly",
-    "shorturl.at", "ow.ly", "goo.gl", "tiny.cc", "s.id", "rb.gy",
-    "localhost",
-})
-
-local ROBLOX_SENSITIVE = set({
-    "auth.roblox.com", "accountsettings.roblox.com", "accountinformation.roblox.com",
-    "billing.roblox.com", "twostepverification.roblox.com", "economy.roblox.com",
-    "payments.roblox.com", "premiumfeatures.roblox.com", "trades.roblox.com",
-    "passwordreset.roblox.com", "apis.roblox.com",
-})
-local ROBLOX_ALL = set({ "roblox.com", "rbxcdn.com" })
-local ROBLOX_SOFT = set({ "apis.roblox.com" })
-local ROBLOX_SENSITIVE_PATHS = {
-    "/my/settings/json", "/mobileapi/userinfo", "/game/getcurrentuser", "/my/account",
-    "/v1/users/authenticated", "/v2/users/authenticated", "/v2/logout", "/v1/account/pin",
-}
-
-local SUSPECT_HOSTS = set({
-    "discord.com", "discordapp.com", "discord.gg", "guilded.gg",
-    "pastebin.com", "paste.ee", "hastebin.com", "ghostbin.com", "controlc.com",
-    "justpaste.it", "rentry.co", "dpaste.com", "termbin.com",
-    "glitch.me", "repl.co", "replit.app", "herokuapp.com", "onrender.com",
-    "vercel.app", "netlify.app", "railway.app", "workers.dev", "pages.dev",
-    "000webhostapp.com", "firebaseio.com", "supabase.co", "sentry.io",
-    "logsnag.com", "logtail.com",
-})
-
-local TRUSTED_HOSTS = set({
-    "raw.githubusercontent.com", "gist.githubusercontent.com",
-    "cdn.jsdelivr.net", "api.luarmor.net",
-})
-
-local DANGEROUS_EXT = set({
-    "exe", "bat", "cmd", "vbs", "ps1", "dll", "scr", "lnk", "msi", "jar", "apk",
-})
-
-local ALWAYS_PATHS = { "/api/webhooks", "/api/v%d+/webhooks", "authentication%-ticket" }
-local OUTBOUND_PATHS = { "/login", "/logout", "/webhook" }
-
-local SECRETS = {
-    ".roblosecurity", "roblosecurity", "_|warning:-do-not-share",
-    "warning:-do-not-share-this", "do-not-share-this.--sharing",
-    "sharing-this-will-allow", "someone-to-log-in-as-you",
-    "and-to-steal-your-robux", "robux-and-items.|_",
-}
-local SECRET_NEEDLES = {}
-for i = 1, #SECRETS do
-    SECRET_NEEDLES[#SECRET_NEEDLES + 1] = SECRETS[i]
-    SECRET_NEEDLES[#SECRET_NEEDLES + 1] = s_reverse(SECRETS[i])
-end
-
-local HOST_NEEDLES = {}
-for h in pairs(HARD_HOSTS) do
-    if #h >= 8 and h ~= "localhost" then HOST_NEEDLES[#HOST_NEEDLES + 1] = h end
-end
-
-local HOSTILE_NEEDLES = {}
-for i = 1, #SECRET_NEEDLES do HOSTILE_NEEDLES[#HOSTILE_NEEDLES + 1] = SECRET_NEEDLES[i] end
-HOSTILE_NEEDLES[#HOSTILE_NEEDLES + 1] = "/api/webhooks"
-for i = 1, #HOST_NEEDLES do HOSTILE_NEEDLES[#HOSTILE_NEEDLES + 1] = HOST_NEEDLES[i] end
-
-local UserAllow, UserBlock, UserWebhooks = {}, {}, {}
-
-local B64 = {}
+local b64map = {}
 do
-    local alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-    for i = 1, #alphabet do B64[s_byte(alphabet, i)] = i - 1 end
-    B64[45] = 62
-    B64[95] = 63
+	local A = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+	for i = 1, 64 do b64map[sbyte(A, i)] = i - 1 end
+	b64map[sbyte("-")], b64map[sbyte("_")] = 62, 63
 end
 
 local function b64decode(s)
-    local out, buf, bits = {}, 0, 0
-    for i = 1, #s do
-        local v = B64[s_byte(s, i)]
-        if v then
-            buf = buf * 64 + v
-            bits = bits + 6
-            if bits >= 8 then
-                bits = bits - 8
-                local p = 2 ^ bits
-                out[#out + 1] = s_char(m_floor(buf / p) % 256)
-                buf = buf % p
-            end
-        end
-    end
-    return t_concat(out)
+	s = sgsub(s, "[^%w%+/%-_]", "")
+	local out, bits, nb = {}, 0, 0
+	for i = 1, #s do
+		local v = b64map[sbyte(s, i)]
+		if not v then return nil end
+		bits = bits * 64 + v
+		nb += 6
+		if nb >= 8 then
+			nb -= 8
+			local byte = math.floor(bits / 2 ^ nb)
+			bits = bits % 2 ^ nb
+			out[#out + 1] = schar(byte)
+		end
+	end
+	return table.concat(out)
 end
 
 local function hexdecode(s)
-    return (s_gsub(s, "%x%x", function(h) return s_char(tonumber(h, 16)) end))
+	if #s % 2 ~= 0 or sfind(s, "[^%x]") then return nil end
+	return (sgsub(s, "%x%x", function(h) return schar(tonumber(h, 16)) end))
 end
 
-local function percentDecode(s)
-    for _ = 1, 4 do
-        local n = s_gsub(s, "%%(%x%x)", function(h) return s_char(tonumber(h, 16)) end)
-        if n == s then break end
-        s = n
-    end
-    return s
+local function urldecode(s)
+	return (sgsub(s, "%%(%x%x)", function(h) return schar(tonumber(h, 16)) end))
 end
 
-local function unescapeJson(s)
-    return (s_gsub(s, "\\u(%x%x%x%x)", function(h)
-        local n = tonumber(h, 16)
-        if n < 128 then return s_char(n) end
-    end))
+local function unescape(s)
+	s = sgsub(s, "\\x(%x%x)", function(h) return schar(tonumber(h, 16)) end)
+	s = sgsub(s, "\\(%d%d?%d?)", function(d)
+		local n = tonumber(d)
+		if n and n < 256 then return schar(n) end
+	end)
+	s = sgsub(s, "\\u{(%x+)}", function(h)
+		local n = tonumber(h, 16)
+		if n and n < 128 then return schar(n) end
+	end)
+	return s
 end
 
-local function luaNormalize(s)
-    s = s_gsub(s, "[Cc]har%s*%(([%d%s,]+)%)", function(args)
-        local t = {}
-        for n in s_gmatch(args, "%d+") do
-            local v = tonumber(n)
-            if v and v < 256 then t[#t + 1] = s_char(v) else return nil end
-        end
-        return '"' .. t_concat(t) .. '"'
-    end)
-    s = s_gsub(s, "\\(%d%d?%d?)", function(d)
-        local n = tonumber(d)
-        if n and n < 256 then return s_char(n) end
-    end)
-    s = s_gsub(s, "\\x(%x%x)", function(h) return s_char(tonumber(h, 16)) end)
-    for _ = 1, 3 do
-        local n = s_gsub(s, "[\"']%s*%.%.%s*[\"']", "")
-        if n == s then break end
-        s = n
-    end
-    return s
+local function charcalls(s)
+	return (sgsub(s, "string%.char%s*%(([%dx%x%s,]-)%)", function(args)
+		local out = {}
+		for tok in sgmatch(args, "[^,]+") do
+			local n = tonumber((sgsub(tok, "%s", "")))
+			if not n or n < 0 or n > 255 then return nil end
+			out[#out + 1] = schar(n)
+		end
+		return table.concat(out)
+	end))
 end
 
-local function expand(text, budget)
-    local out = {}
-    if type(text) ~= "string" or text == "" then return out end
-    budget = budget or { n = CFG.DecodeBudget }
-    local queue, depth, qi = { text }, { 0 }, 1
-    while qi <= #queue and #out < 96 do
-        local t, d = queue[qi], depth[qi]
-        qi = qi + 1
-        out[#out + 1] = s_lower(percentDecode(unescapeJson(t)))
-        if d <= 1 and budget.n > 0 and (s_find(t, "[\\\"']") or s_find(t, "[Cc]har%s*%(")) then
-            out[#out + 1] = s_lower(luaNormalize(t))
-        end
-        if d < 3 and budget.n > 0 then
-            for run in s_gmatch(t, "[%w%+/%-_=]+") do
-                if #run >= 16 and #queue < 160 then
-                    for o = 0, 3 do
-                        if budget.n <= 0 then break end
-                        budget.n = budget.n - #run
-                        local dec = b64decode(s_sub(run, o + 1))
-                        if #dec >= 8 then
-                            queue[#queue + 1] = dec
-                            depth[#depth + 1] = d + 1
-                        end
-                    end
-                end
-            end
-            for run in s_gmatch(t, "%x+") do
-                if #run >= 24 and #queue < 160 and budget.n > 0 then
-                    budget.n = budget.n - #run
-                    queue[#queue + 1] = hexdecode(run)
-                    depth[#depth + 1] = d + 1
-                    queue[#queue + 1] = hexdecode(s_sub(run, 2))
-                    depth[#depth + 1] = d + 1
-                end
-            end
-        end
-    end
-    return out
+local function printableRatio(s)
+	local n = #s
+	if n == 0 then return 1 end
+	local p = 0
+	for i = 1, n do
+		local b = sbyte(s, i)
+		if (b >= 32 and b < 127) or b == 9 or b == 10 or b == 13 then p += 1 end
+	end
+	return p / n
 end
 
-local function hasAny(variants, needles)
-    for v = 1, #variants do
-        local t = variants[v]
-        for n = 1, #needles do
-            if s_find(t, needles[n], 1, true) then return true end
-        end
-    end
-    return false
+local TARGET_WORDS = { "http", "://", "roblox", "discord", "webhook", ".com" }
+local function looksLikeTarget(s)
+	local l = slower(s)
+	for _, k in ipairs(TARGET_WORDS) do if sfind(l, k, 1, true) then return true end end
+	return false
 end
 
-local function cleanUrl(u)
-    u = s_gsub(u, "[%c%s]", "")
-    u = s_gsub(u, "\\", "/")
-    return s_lower(u)
+local function DeepDecode(text)
+	local out, seen, queue, qi = { text }, { [text] = true }, { { text, 0 } }, 1
+	local function push(v, d)
+		if v and v ~= "" and not seen[v] and #out < 48 then
+			seen[v] = true
+			out[#out + 1] = v
+			queue[#queue + 1] = { v, d }
+		end
+	end
+	while qi <= #queue do
+		local cur, d = queue[qi][1], queue[qi][2]
+		qi += 1
+		if d < 5 then
+			push(urldecode(cur), d + 1)
+			push(unescape(cur), d + 1)
+			push(charcalls(cur), d + 1)
+			for tok in sgmatch(cur, "[%w%+/%-_=]+") do
+				if #tok >= 16 then
+					local dec = hexdecode(tok)
+					if not dec or printableRatio(dec) < 0.85 then dec = b64decode(tok) end
+					if dec and printableRatio(dec) >= 0.85 then push(dec, d + 1) end
+				end
+			end
+			if bxor and #cur >= 8 and #cur <= 4096 and printableRatio(cur) < 0.7 then
+				for key = 1, 255 do
+					local buf = {}
+					for i = 1, #cur do buf[i] = schar(bxor(sbyte(cur, i), key)) end
+					local r = table.concat(buf)
+					if printableRatio(r) >= 0.95 and looksLikeTarget(r) then push(r, d + 1) break end
+				end
+			end
+		end
+	end
+	return out
 end
 
-local function parseUrl(u)
-    local rest = u
-    if s_match(rest, "^%a[%w+.-]*:/") then
-        rest = s_gsub(rest, "^%a[%w+.-]*:/*", "")
-    else
-        rest = s_gsub(rest, "^/+", "")
-    end
-    local authority, path = s_match(rest, "^([^/?#]*)(.*)$")
-    authority = s_match(authority, "([^@]*)$")
-    local port = s_match(authority, ":(%d+)$")
-    local host = s_gsub(authority, ":%d*$", "")
-    host = s_gsub(host, "%.+$", "")
-    path = s_gsub(s_gsub(path, "/%./", "/"), "/+", "/")
-    return host, path, port
+local BAD = {}
+local function addBad(cat, list)
+	for _, p in ipairs(list) do BAD[#BAD + 1] = { cat, slower(p) } end
+end
+addBad("webhook", { "/api/webhooks", "discord.com/api/webhooks", "discordapp.com/api/webhooks",
+	"ptb.discord.com/api", "canary.discord.com/api", "guilded.gg/api/webhooks", "media.guilded.gg/webhooks",
+	"webhook.site", "hooks.slack.com", "api.telegram.org/bot", "pipedream.net", "requestbin",
+	"beeceptor", "hooks.zapier.com", "ngrok" })
+addBad("iplogger", { "iplogger.", "grabify.", "ipify.org", "ip-api.com", "ipinfo.io", "ipapi.co", "2no.co",
+	"yip.su", "blasze.", "ipgrabber", "leakix.net", "icanhazip", "ifconfig.me", "ident.me", "ipecho.net",
+	"checkip.amazonaws", "whatismyip", "myip.com" })
+addBad("pastebin", { "pastebin.com", "hastebin.", "hasteb.in", "paste.ee", "ghostbin.", "rentry.co",
+	"controlc.com", "pastefy.", "justpaste.it", "paste.gg", "pastes.io", "privatebin", "dpaste." })
+addBad("roblox-cookie", { "roblox.com/api", "roblox.com/mobileapi", "roblox.com/my/", "roblox.com/users/account",
+	"roblox.com/authentication", "roblox.com/reference/", "roblox.com/promocodes", "users.roblox.com",
+	"auth.roblox.com", "accountsettings.roblox.com", "accountinformation.roblox.com", "economy.roblox.com",
+	"billing.roblox.com", "apis.roblox.com", "friends.roblox.com", "premiumfeatures.roblox.com",
+	"trades.roblox.com", "twostepverification.roblox.com", "roblosecurity", "do-not-share-this" })
+
+local function Flatten(s)
+	s = slower(s)
+	s = sgsub(s, "%.%.", "")
+	s = sgsub(s, "[%s\"'`,{}%(%)%[%]\\]", "")
+	return s
 end
 
-local function hostIn(host, list)
-    if list[host] then return host end
-    for entry in pairs(list) do
-        if #host > #entry and s_sub(host, -(#entry + 1)) == "." .. entry then
-            return entry
-        end
-    end
+local function Scan(text)
+	if type(text) ~= "string" or text == "" then return nil end
+	if #text > 100000 then text = ssub(text, 1, 100000) end
+	for _, v in ipairs(DeepDecode(text)) do
+		local flat = Flatten(v)
+		local rev = sreverse(flat)
+		for _, e in ipairs(BAD) do
+			if sfind(flat, e[2], 1, true) or sfind(rev, e[2], 1, true) then return e[1], e[2] end
+		end
+		if sfind(flat, "https?://%d+%.%d+%.%d+%.%d+") then return "ip-directa", "http://<ip>" end
+	end
 end
 
-local function isIPHost(host)
-    return s_match(host, "^%d+%.%d+%.%d+%.%d+$") ~= nil
-        or s_find(host, "0x%x") ~= nil
-        or s_match(host, "^%d+$") ~= nil
-        or s_sub(host, 1, 1) == "["
+local OBF_SIGS = { "luraph", "lph_", "lph!", "moonsec", "wearedevs.net/obfuscator", "ironbrew", "iron brew",
+	"prometheus obfuscator", "levno_710", "boronide", "luaobfuscator", "aztupbrew", "synapse xen",
+	"this file was protected", "protected using", "obfuscated by", "psu|" }
+
+local function Entropy(s)
+	if #s > 200000 then s = ssub(s, 1, 200000) end
+	local len = #s
+	if len == 0 then return 0 end
+	local freq = {}
+	for i = 1, len do
+		local b = sbyte(s, i)
+		freq[b] = (freq[b] or 0) + 1
+	end
+	local e = 0
+	for _, c in pairs(freq) do
+		local p = c / len
+		e -= p * math.log(p, 2)
+	end
+	return e
 end
 
-local function dnsSuspicious(host)
-    local n = 0
-    for label in s_gmatch(host, "[^%.]+") do
-        n = n + 1
-        if #label >= 32 or (#label >= 24 and s_match(label, "^%x+$")) then return true end
-    end
-    return n > 7
+local function Analyze(src)
+	local res = { block = false, warn = false, reasons = {}, entropy = 0 }
+	if type(src) ~= "string" then return res end
+	local sample = #src > 200000 and ssub(src, 1, 200000) or src
+	local obf = false
+	local low = slower(sample)
+	for _, sig in ipairs(OBF_SIGS) do
+		if sfind(low, sig, 1, true) then
+			obf = true
+			res.reasons[#res.reasons + 1] = "firma: " .. sig
+			break
+		end
+	end
+	if #sample >= Config.EntropyMinLen then
+		res.entropy = Entropy(sample)
+		if res.entropy >= Config.EntropyThreshold then
+			obf = true
+			res.reasons[#res.reasons + 1] = ("entropía %.2f"):format(res.entropy)
+		elseif res.entropy >= Config.EntropyThreshold - 0.35 then
+			res.warn = true
+			res.reasons[#res.reasons + 1] = ("entropía sospechosa %.2f"):format(res.entropy)
+		end
+	end
+	local seg = ssub(sample, 1, 50000)
+	local _, esc = sgsub(seg, "\\%d%d%d", "")
+	if esc > 200 and (esc * 4) / math.max(#seg, 1) > 0.3 then
+		obf = true
+		res.reasons[#res.reasons + 1] = "exceso de escapes \\ddd"
+	end
+	if obf then
+		if Config.ObfMode == "block" then res.block = true else res.warn = true end
+	end
+	local cat, pat = Scan(sample)
+	if cat then
+		res.block = true
+		res.reasons[#res.reasons + 1] = "exfiltración [" .. cat .. "]: " .. pat
+	end
+	return res
 end
 
-local function identInUrl(host, path)
-    if not (CFG.IdentityGuard and #IDENT > 0) or hostIn(host, ROBLOX_ALL) then return false end
-    for i = 1, #IDENT do
-        local v = IDENT[i]
-        if #v >= 8 and (s_find(host, v, 1, true) or s_find(path, v, 1, true)) then return true end
-    end
-    for rawseg in s_gmatch(path, "[^/]+") do
-        local seg = s_lower(percentDecode(s_match(rawseg, "^[^?#]*")))
-        local base = s_match(seg, "^([^%.]+)") or seg
-        for i = 1, #IDENT do
-            if seg == IDENT[i] or base == IDENT[i] then return true end
-        end
-    end
-    for label in s_gmatch(host, "[^%.]+") do
-        for i = 1, #IDENT do
-            if label == IDENT[i] then return true end
-        end
-    end
-    return false
+local function ser(v, d)
+	d = d or 0
+	if type(v) == "table" and d < 3 then
+		local parts = {}
+		for k, x in pairs(v) do parts[#parts + 1] = tostring(k) .. ":" .. ser(x, d + 1) end
+		return table.concat(parts, "\n")
+	end
+	return tostring(v)
 end
 
-local function field(t, name)
-    local v = t[name]
-    if v ~= nil then return v end
-    local ln = s_lower(name)
-    for k, val in next, t do
-        if type(k) == "string" and s_lower(k) == ln then return val end
-    end
+local function hostAllowed(url)
+	local auth = smatch(slower(tostring(url)), "^%a[%w%+%.%-]*://([^/%?#]+)")
+	if not auth then return false end
+	auth = sgsub(sgsub(auth, "^.*@", ""), ":%d+$", "")
+	for _, h in ipairs(Config.AllowHosts) do
+		h = slower(h)
+		if auth == h or ssub(auth, -#h - 1) == "." .. h then return true end
+	end
+	return false
 end
 
-local function headersToString(h)
-    if type(h) ~= "table" then return "", false end
-    local parts = {}
-    for k, v in next, h do
-        local tv = type(v)
-        if (type(k) ~= "string" and type(k) ~= "number") or (tv ~= "string" and tv ~= "number") then
-            return "", true
-        end
-        parts[#parts + 1] = tostring(k) .. ":" .. tostring(v)
-    end
-    return t_concat(parts, "\n"), false
+-- FIX: BYPASS PARA LA UI (isInternalFetch)
+local function NetGate(kind, url, headers, body)
+    if rawget(genv, "isInternalFetch") == true then return false end
+    
+	local short = ssub(tostring(url), 1, 120)
+	if Config.NetMode == "blockall" then
+		Log("BLOCK", "net", kind .. " bloqueado (NetMode=blockall)", short)
+		return true
+	end
+	local ok, blob = pcall(function() return tostring(url) .. "\n" .. ser(headers) .. "\n" .. ser(body) end)
+	if ok then
+		local cat, pat = Scan(blob)
+		if cat then
+			Log("BLOCK", "net", kind .. " bloqueado [" .. cat .. "]", short)
+			return true
+		end
+	end
+	if Config.StrictAllowlist and not hostAllowed(url) then
+		Log("BLOCK", "net", kind .. " bloqueado (host fuera de allowlist)", short)
+		return true
+	end
+	return false
 end
 
-local function snapshot(t, depth)
-    local c = {}
-    for k, v in next, t do
-        if depth > 0 and type(v) == "table" then v = snapshot(v, depth - 1) end
-        c[k] = v
-    end
-    return c
+local function FakeResponse()
+	return { Success = false, StatusCode = 403, StatusMessage = "Blocked by BLADEX Guard", Headers = {}, Body = "" }
+end
+local function FakeInternal()
+	return { Start = function(_, cb) if type(cb) == "function" then task.spawn(cb, false, FakeResponse()) end end, Cancel = function() end }
 end
 
-local function ambiguous(t)
-    local seen = {}
-    for k in next, t do
-        if type(k) == "string" then
-            local l = s_lower(k)
-            if seen[l] then return true end
-            seen[l] = true
-        end
-    end
-    return false
+local rawIndex
+local RV, IDX, NI = {}, {}, {}
+
+local function R(names, fn, wrapOnIndex)
+	for _, n in ipairs(names) do
+		local camel = slower(ssub(n, 1, 1)) .. ssub(n, 2)
+		for _, v in ipairs({ n, camel, slower(n) }) do
+			RV[v] = fn
+			if wrapOnIndex then IDX[v] = true end
+		end
+	end
 end
 
-local taintUntil = 0
-local function taint(seconds)
-    local t = os_clock() + seconds
-    if t > taintUntil then taintUntil = t end
+local function localChar() return rawIndex(LocalPlayer, "Character") end
+local function isLocalHumanoid(i)
+	local c = localChar()
+	return c ~= nil and rawIndex(i, "ClassName") == "Humanoid" and rawIndex(i, "Parent") == c
+end
+local CRIT = { Head = 1, HumanoidRootPart = 1, Torso = 1, UpperTorso = 1, LowerTorso = 1, Neck = 1, Root = 1 }
+local function isCritical(i)
+	local c = localChar()
+	if not c then return false end
+	if i == c then return true end
+	if rawIndex(i, "ClassName") == "Humanoid" then return rawIndex(i, "Parent") == c end
+	if CRIT[rawIndex(i, "Name")] then
+		local p = rawIndex(i, "Parent")
+		return p ~= nil and (p == c or rawIndex(p, "Parent") == c)
+	end
+	return false
 end
 
-local function judge(u, outbound, idHit, lenient)
-    local host, path, port = parseUrl(u)
-    if host == "" then return true, "host-vacio" end
-    if hostIn(host, UserBlock) then return true, "bloqueado-usuario" end
-    for p in pairs(UserWebhooks) do
-        if s_sub(u, 1, #p) == p then return false end
-    end
-    for i = 1, #ALWAYS_PATHS do
-        if s_find(path, ALWAYS_PATHS[i]) then return true, "ruta-peligrosa" end
-    end
-    if hostIn(host, UserAllow) then return false end
-    if s_find(host, "[\128-\255]") or s_find(host, "xn--", 1, true) then return true, "host-unicode" end
-    if not s_find(host, ".", 1, true) then return true, "host-sin-dominio" end
-    if hostIn(host, HARD_HOSTS) then return true, "host-malicioso" end
-    if hostIn(host, ROBLOX_SENSITIVE) and not (lenient and hostIn(host, ROBLOX_SOFT)) then
-        return true, "api-roblox-sensible"
-    end
-    if hostIn(host, ROBLOX_ALL) then
-        for i = 1, #ROBLOX_SENSITIVE_PATHS do
-            if s_find(path, ROBLOX_SENSITIVE_PATHS[i], 1, true) then return true, "api-roblox-sensible" end
-        end
-    end
-    if CFG.BlockIPHosts and isIPHost(host) then return true, "host-ip-directa" end
-    local trusted = hostIn(host, TRUSTED_HOSTS)
-    if not trusted then
-        if CFG.BlockDnsExfil and dnsSuspicious(host) then return true, "dns-exfil" end
-        if outbound and port and port ~= "80" and port ~= "443" then return true, "puerto-inusual" end
-        if idHit or (not lenient and identInUrl(host, path)) then return true, "identidad-saliente" end
-    end
-    if outbound then
-        for i = 1, #OUTBOUND_PATHS do
-            if s_find(path, OUTBOUND_PATHS[i], 1, true) then return true, "ruta-peligrosa" end
-        end
-        if hostIn(host, SUSPECT_HOSTS) then return true, "exfiltracion-sospechosa" end
-        if not trusted then
-            if CFG.Strict then return true, "estricto-host-no-confiable" end
-            if os_clock() < taintUntil then return true, "script-ofuscado-saliente" end
-        end
-    end
-    return false
+R({ "Kick" }, function(self, _, msg)
+	if self == LocalPlayer then Log("BLOCK", "anti-kick", "Player:Kick() bloqueado", msg) return true end
+end, true)
+R({ "Shutdown" }, function(self)
+	if rawIndex(self, "ClassName") == "DataModel" then Log("BLOCK", "anti-kick", "game:Shutdown() bloqueado") return true end
+end, true)
+
+R({ "Kill", "BreakJoints" }, function(self, name)
+	if isCritical(self) then Log("BLOCK", "anti-kill", name .. "() bloqueado") return true end
+end, true)
+R({ "TakeDamage" }, function(self, _, amt)
+	if isLocalHumanoid(self) and type(amt) == "number" and amt >= rawIndex(self, "Health") then
+		Log("BLOCK", "anti-kill", "TakeDamage letal bloqueado", amt) return true
+	end
+end, true)
+R({ "ChangeState" }, function(self, _, st)
+	if isLocalHumanoid(self) and (st == Enum.HumanoidStateType.Dead or st == 15) then
+		Log("BLOCK", "anti-kill", "ChangeState(Dead) bloqueado") return true
+	end
+end, true)
+R({ "Destroy", "Remove", "ClearAllChildren" }, function(self, name)
+	if isCritical(self) then Log("BLOCK", "anti-kill", name .. "() sobre personaje bloqueado") return true end
+end)
+NI.Health = function(self, v)
+	if isLocalHumanoid(self) and type(v) == "number" and (v <= 0 or v ~= v) then
+		Log("BLOCK", "anti-kill", "Humanoid.Health = " .. tostring(v) .. " bloqueado") return true
+	end
+end
+NI.MaxHealth = function(self, v)
+	if isLocalHumanoid(self) and type(v) == "number" and (v <= 0 or v ~= v) then
+		Log("BLOCK", "anti-kill", "Humanoid.MaxHealth inválido bloqueado") return true
+	end
+end
+NI.Parent = function(self)
+	if isCritical(self) then Log("BLOCK", "anti-kill", "Parent = nil sobre personaje bloqueado") return true end
 end
 
-local function evaluate(url, method, body, headers, internal)
-    if url == nil then return false end
-    if type(url) ~= "string" then return true, "url-invalida" end
-    if #url > CFG.MaxUrl then return true, "url-enorme" end
-    if method ~= nil and type(method) ~= "string" then return true, "metodo-invalido" end
-    if body ~= nil and type(body) ~= "string" then return true, "body-invalido" end
-    if headers ~= nil and type(headers) ~= "table" then return true, "headers-invalidos" end
+local function netRule(self, name, a1, a2, a3, a4, a5)
+	local l, url, headers, body = slower(name), nil, nil, nil
+	if l == "requestasync" or l == "requestinternal" then
+		if type(a1) == "table" then url, headers, body = a1.Url, a1.Headers, a1.Body end
+	elseif l == "httppost" or l == "httppostasync" then url, body = a1, a2
+	elseif l == "postasync" then url, body, headers = a1, a2, a5
+	elseif l == "getasync" then url, headers = a1, a3
+	else url = a1 end
+	if NetGate(name, url, headers, body) then
+		if l == "requestasync" then return true, FakeResponse() end
+		if l == "requestinternal" then return true, FakeInternal() end
+		return true, ""
+	end
+end
+R({ "HttpGet", "HttpGetAsync", "HttpPost", "HttpPostAsync", "RequestAsync", "GetAsync", "PostAsync", "RequestInternal" }, netRule, true)
 
-    method = s_upper(method or "GET")
-    local outbound = (method ~= "GET" and method ~= "HEAD") or (body ~= nil and body ~= "")
-    local lenient = internal == true and not outbound
+R({ "OpenBrowserWindow", "OpenNativeOverlay" }, function(_, name, url)
+	Log("BLOCK", "browser", name .. " bloqueado", url) return true
+end, true)
+R({ "ExecuteJavaScript", "SendCommand" }, function(_, name)
+	Log("BLOCK", "browser", name .. " bloqueado") return true
+end, true)
 
-    local raw = cleanUrl(url)
-    if body and #body > CFG.MaxBody and not hostIn((parseUrl(raw)), UserAllow) then
-        return true, "payload-enorme"
-    end
+R({ "Teleport", "TeleportAsync", "TeleportToPlaceInstance", "TeleportPartyAsync" }, function(_, name)
+	Log("WARN", "teleport", name .. " detectado")
+end)
 
-    local hs, badHeaders = headersToString(headers)
-    if badHeaders then return true, "headers-invalidos" end
-
-    local budget = { n = CFG.DecodeBudget }
-    local vb = expand(body, budget)
-    local vh = expand(hs, budget)
-
-    if hasAny(expand(url, budget), SECRET_NEEDLES) or hasAny(vb, SECRET_NEEDLES) or hasAny(vh, SECRET_NEEDLES) then
-        return true, "secreto-detectado"
-    end
-
-    local idHit = false
-    if CFG.IdentityGuard and #IDENT > 0 then
-        local q = s_match(percentDecode(url), "[?#](.*)$") or ""
-        idHit = hasAny(expand(q, budget), IDENT) or hasAny(vb, IDENT) or hasAny(vh, IDENT)
-    end
-
-    local decoded = cleanUrl(percentDecode(url))
-    local blocked, reason = judge(raw, outbound, idHit, lenient)
-    if blocked then return true, reason end
-    if decoded ~= raw then
-        blocked, reason = judge(decoded, outbound, idHit, lenient)
-        if blocked then return true, reason end
-    end
-    return false
+local Hooked = {}
+local function HookFn(owner, key, handler)
+	local orig = owner and owner[key]
+	if type(orig) ~= "function" then return false end
+	local prev = Hooked[orig]
+	if prev then if owner[key] ~= prev then pcall(function() owner[key] = prev end) end return true end
+	local old
+	local rep = newcclosure(function(...) return handler(old, ...) end)
+	if hookfunction then
+		local ok, res = pcall(hookfunction, orig, rep)
+		if ok and type(res) == "function" then old = res Hooked[orig] = orig return true end
+	end
+	old = orig
+	Hooked[orig] = rep
+	return (pcall(function() owner[key] = rep end))
 end
 
-local function scanPayload(data, checkIdentity)
-    if type(data) ~= "string" then return true, "body-invalido" end
-    if #data > CFG.MaxBody then return true, "payload-enorme" end
-    local v = expand(data)
-    if hasAny(v, SECRET_NEEDLES) then return true, "secreto-detectado" end
-    if checkIdentity and CFG.IdentityGuard and hasAny(v, IDENT) then
-        return true, "identidad-saliente"
-    end
-    return false
+local function reqHandler(old, opts, ...)
+	if type(opts) == "table" then
+		local ok, url, headers, body = pcall(function()
+			return opts.Url or opts.url, opts.Headers or opts.headers, opts.Body or opts.body
+		end)
+		if ok and NetGate("request", url, headers, body) then return FakeResponse() end
+	end
+	return old(opts, ...)
+end
+for _, k in ipairs({ "request", "http_request" }) do HookFn(genv, k, reqHandler) end
+HookFn(genv.syn, "request", reqHandler)
+HookFn(genv.http, "request", reqHandler)
+HookFn(genv.fluxus, "request", reqHandler)
+HookFn(genv.WebSocket, "connect", function(old, url, ...)
+	if NetGate("WebSocket.connect", url) then return nil end
+	return old(url, ...)
+end)
+
+HookFn(genv, "loadstring", function(old, src, ...)
+	if type(src) == "string" then
+		local v = Analyze(src)
+		if v.block then
+			Log("BLOCK", "loadstring", "Ejecución bloqueada: " .. table.concat(v.reasons, "; "))
+			return function() end
+		elseif v.warn then
+			Log("WARN", "loadstring", "Código sospechoso: " .. table.concat(v.reasons, "; "))
+		end
+	end
+	return old(src, ...)
+end)
+local function qotHandler(old, src, ...)
+	if type(src) == "string" then
+		local v = Analyze(src)
+		if v.block then
+			Log("BLOCK", "queue_on_teleport", "Bloqueado: " .. table.concat(v.reasons, "; "))
+			return
+		elseif v.warn then
+			Log("WARN", "queue_on_teleport", "Sospechoso: " .. table.concat(v.reasons, "; "))
+		end
+	end
+	return old(src, ...)
+end
+HookFn(genv, "queue_on_teleport", qotHandler)
+HookFn(genv.syn, "queue_on_teleport", qotHandler)
+HookFn(genv.fluxus, "queue_on_teleport", qotHandler)
+
+local function describe(a)
+	local ok, s = pcall(function() return rawIndex(a, "GetFullName")(a) end)
+	return ok and s or tostring(a)
+end
+for _, name in ipairs({ "firetouchinterest", "fireclickdetector", "fireproximityprompt" }) do
+	HookFn(genv, name, function(old, a, ...)
+		local mode = Config.PhysicalMode
+		if mode == "allow" then return old(a, ...) end
+		if mode == "block" then Log("BLOCK", "physical", name .. " bloqueado", describe(a)) return end
+		Log("WARN", "physical", name .. " detectado", describe(a))
+		return old(a, ...)
+	end)
 end
 
-local Log = {}
-local Stats = { total = 0, reasons = {} }
-local lastWarn, lastWarnCount, lastNotify = {}, 0, 0
+local mt = getrawmetatable(game)
+local oldNamecall, oldIndex, oldNewIndex = mt.__namecall, mt.__index, mt.__newindex
+rawIndex = oldIndex
 
-local function maskUrl(u)
-    return (s_gsub(u, "[^/]+", function(seg)
-        if #seg >= 24 then return s_sub(seg, 1, 6) .. "..." end
-    end))
+local hookNC = newcclosure(function(self, ...)
+	local method = getnamecallmethod()
+	if type(method) == "string" then
+		local rule = RV[method]
+		if rule and typeof(self) == "Instance" then
+			local ok, blocked, ret = pcall(rule, self, method, ...)
+			if ok and blocked then return ret end
+			setnamecallmethod(method)
+		end
+	end
+	return oldNamecall(self, ...)
+end)
+
+local hookIdx = newcclosure(function(self, k)
+	if type(k) == "string" and IDX[k] and typeof(self) == "Instance" then
+		local f = oldIndex(self, k)
+		if type(f) == "function" then
+			local rule = RV[k]
+			return newcclosure(function(s, ...)
+				local ok, blocked, ret = pcall(rule, s, k, ...)
+				if ok and blocked then return ret end
+				return f(s, ...)
+			end)
+		end
+		return f
+	end
+	return oldIndex(self, k)
+end)
+
+local hookNI = newcclosure(function(self, k, v)
+	if type(k) == "string" and NI[k] and (k ~= "Parent" or v == nil) and typeof(self) == "Instance" then
+		local ok, blocked = pcall(NI[k], self, v)
+		if ok and blocked then return end
+	end
+	return oldNewIndex(self, k, v)
+end)
+
+local function InstallMeta()
+	setreadonly(mt, false)
+	local ok, err = pcall(function()
+		mt.__namecall, mt.__index, mt.__newindex = hookNC, hookIdx, hookNI
+	end)
+	setreadonly(mt, true)
+	if not ok then Log("WARN", "meta", "Fallo al hookear metatabla", err) end
+	return ok
 end
+InstallMeta()
 
-local function emit(source, safe, reason, warnOnly, detail)
-    local now = os_clock()
-    local key = reason .. "|" .. safe
-    if lastWarn[key] and now - lastWarn[key] < 5 then return end
-    if lastWarnCount > 500 then
-        lastWarn, lastWarnCount = {}, 0
-    end
-    lastWarn[key] = now
-    lastWarnCount = lastWarnCount + 1
+local lastTamper = 0
+task.spawn(function()
+	while true do
+		task.wait(0.5)
+		if Config.Watchdog and (mt.__namecall ~= hookNC or mt.__index ~= hookIdx or mt.__newindex ~= hookNI) then
+			InstallMeta()
+			if os.clock() - lastTamper > 5 then
+				lastTamper = os.clock()
+				Log("WARN", "tamper", "Alguien modificó los hooks del Guard; reinstalados")
+			end
+		end
+	end
+end)
 
-    if CFG.Debug then
-        warn(s_format("[Bladex Guard] %s (%s) via %s -> %s%s",
-            warnOnly and "ADVERTENCIA" or "BLOQUEADO", reason, source, safe,
-            detail and (" [" .. detail .. "]") or ""))
-    end
-    if CFG.Notify and now - lastNotify >= 3 then
-        lastNotify = now
-        task.defer(function()
-            pcall(function()
-                StarterGui:SetCore("SendNotification", {
-                    Title = "Bladex Guard",
-                    Text = reason,
-                    Duration = 3,
-                })
-            end)
-        end)
-    end
+local API = { Version = "5.0.0", Loaded = true }
+
+function API.GetLogs(filter)
+	filter = type(filter) == "table" and filter or {}
+	local out = {}
+	for _, e in ipairs(Logs) do
+		if (not filter.Level or e.Level == filter.Level)
+			and (not filter.Category or e.Category == filter.Category)
+			and (not filter.SinceId or e.Id > filter.SinceId) then
+			local c = {}
+			for k, v in pairs(e) do c[k] = v end
+			out[#out + 1] = c
+		end
+	end
+	if filter.Limit and #out > filter.Limit then
+		local t = {}
+		for i = #out - filter.Limit + 1, #out do t[#t + 1] = out[i] end
+		out = t
+	end
+	return out
 end
-
-local function record(source, url, method, reason, warnOnly, detail)
-    Stats.total = Stats.total + 1
-    Stats.reasons[reason] = (Stats.reasons[reason] or 0) + 1
-
-    local su = type(url) == "string" and url or ("<" .. type(url) .. ">")
-    local safe = maskUrl(s_match(su, "^[^?]*") or "")
-    if #safe > 90 then safe = s_sub(safe, 1, 90) .. "..." end
-
-    Log[#Log + 1] = { t = os_clock(), source = source, method = method, url = safe, reason = reason, detail = detail }
-    if #Log > CFG.MaxLog then t_remove(Log, 1) end
-
-    emit(source, safe, reason, warnOnly, detail)
+function API.ClearLogs() table.clear(Logs) end
+function API.GetColor(level) return COLORS[level] or COLORS.INFO end
+function API.OnLog(cb)
+	if type(cb) ~= "function" then return nil end
+	Listeners[#Listeners + 1] = cb
+	return { Disconnect = function()
+		for i, f in ipairs(Listeners) do if f == cb then table.remove(Listeners, i) break end end
+	end }
 end
-
--- Bandera de peticion interna: acotada en tiempo y solo relaja GET sin cuerpo
-local internalSince, internalSeen = nil, 0
-local function internalActive()
-    if not CFG.InternalFetch or rawget(genv, "isInternalFetch") ~= true then
-        internalSince = nil
-        return false
-    end
-    local now = os_clock()
-    if not internalSince or now - internalSeen > 5 then internalSince = now end
-    internalSeen = now
-    if now - internalSince > CFG.InternalMax then
-        pcall(function() genv.isInternalFetch = false end)
-        internalSince = nil
-        record("guard", "isInternalFetch", "FLAG", "bandera-interna-expirada")
-        return false
-    end
-    return true
+function API.GetStats()
+	local c = { BLOCK = Stats.BLOCK, WARN = Stats.WARN, INFO = Stats.INFO, ByCategory = {} }
+	for k, v in pairs(Stats.ByCategory) do c.ByCategory[k] = v end
+	return c
 end
-
-local function inspect(source, url, method, body, headers)
-    local ok, blocked, reason = pcall(evaluate, url, method, body, headers, internalActive())
-    if not ok then
-        blocked, reason = CFG.FailClosed, "error-interno"
-    end
-    if blocked then record(source, url, method or "GET", reason) end
-    return blocked
+function API.GetConfig()
+	local c = {}
+	for k, v in pairs(Config) do c[k] = v end
+	return c
 end
+function API.Scan(text) return Scan(text) end
+function API.Analyze(src) return Analyze(src) end
+function API.Decode(text) return DeepDecode(text) end
+function API.Entropy(src) return Entropy(src) end
 
-local function inspectOpts(source, snap)
-    if ambiguous(snap) then
-        record(source, field(snap, "Url"), "REQ", "args-ambiguos")
-        return true
-    end
-    return inspect(source, field(snap, "Url"), field(snap, "Method"), field(snap, "Body"), field(snap, "Headers"))
-end
-
-local function fakeResponse()
-    return { Success = true, StatusCode = 200, StatusMessage = "OK", Body = '{"status":"ok"}', Headers = {} }
-end
-
-local GET_M = { HttpGet = true, HttpGetAsync = true, GetAsync = true }
-local POST_M = { HttpPost = true, HttpPostAsync = true, PostAsync = true }
-local NET_M = {
-    HttpGet = true, HttpGetAsync = true, GetAsync = true,
-    HttpPost = true, HttpPostAsync = true, PostAsync = true, RequestAsync = true,
-}
-local DANGEROUS_M = { Kick = true, kick = true, Kill = true, FireTouchInterest = true }
-local PURCHASE_M = {
-    PromptPurchase = true, PromptGamePassPurchase = true, PromptBundlePurchase = true,
-    PromptProductPurchase = true, PromptPremiumPurchase = true, PromptRobuxPurchase = true,
-    PromptSubscriptionPurchase = true, PromptNativePurchase = true,
-}
-
-local function inspectNet(m, a)
-    if GET_M[m] then
-        if type(a[3]) == "table" then a[3] = snapshot(a[3], 0) end
-        return inspect(m, a[1], "GET", nil, a[3]), "text"
-    elseif POST_M[m] then
-        if type(a[5]) == "table" then a[5] = snapshot(a[5], 0) end
-        return inspect(m, a[1], "POST", a[2], a[5]), "text"
-    elseif m == "RequestAsync" then
-        if type(a[1]) ~= "table" then return false end
-        a[1] = snapshot(a[1], 1)
-        return inspectOpts(m, a[1]), "table"
-    end
-    return false
-end
-
-local function isNetTarget(self)
-    if typeof(self) ~= "Instance" then return false end
-    if self == game then return true end
-    local cn = self.ClassName
-    return cn == "HttpService" or cn == "HttpRbxApiService"
-end
-
--- Hook de metatabla: desbloquea si es readonly, aplica, vuelve a bloquear
-local function hookMeta(key, handler)
-    local mt
-    if getrawmetatable then
-        local ok, r = pcall(getrawmetatable, game)
-        if ok and type(r) == "table" then mt = r end
-    end
-    local wasRO = false
-    if mt and isreadonly then
-        local ok, r = pcall(isreadonly, mt)
-        wasRO = ok and r == true
-    end
-    if wasRO and setreadonly then pcall(setreadonly, mt, false) end
-    local old
-    if hookmetamethod then
-        local ok, res = pcall(hookmetamethod, game, key, handler)
-        if ok then old = res end
-    end
-    if old == nil and mt then
-        old = rawget(mt, key)
-        if not pcall(function() mt[key] = handler end) then old = nil end
-    end
-    if wasRO and setreadonly then pcall(setreadonly, mt, true) end
-    if old == nil then warn("[Bladex Guard] no se pudo hookear " .. key) end
-    return old
-end
-
-local oldNamecall
-oldNamecall = hookMeta("__namecall", mark(newcc(function(self, ...)
-    local m = getnamecallmethod()
-
-    if m == "RequestInternal" then
-        if cancall and checkcaller() and isNetTarget(self) then
-            local a = t_pack(...)
-            record(m, type(a[1]) == "table" and field(snapshot(a[1], 0), "Url") or "?", "REQ", "request-interno")
-            return fakeResponse()
-        end
-    elseif NET_M[m] then
-        if isNetTarget(self) then
-            local a = t_pack(...)
-            local blocked, kind = inspectNet(m, a)
-            if blocked then
-                if kind == "table" then return fakeResponse() end
-                return ""
-            end
-            if setnamecallmethod then setnamecallmethod(m) end
-            return oldNamecall(self, t_unpack(a, 1, a.n))
-        end
-    elseif m == "OpenBrowserWindow" then
-        if inspect(m, (...), "GET") then return end
-    elseif PURCHASE_M[m] then
-        if CFG.BlockPurchasePrompts and cancall and checkcaller() then
-            record(m, "marketplace", "CALL", "compra-bloqueada")
-            return
-        end
-    elseif DANGEROUS_M[m] then
-        -- solo bloquea si lo dispara un script externo (no tu entorno)
-        if CFG.AntiKick and cancall and not checkcaller() and (self == LP or (m ~= "Kick" and m ~= "kick")) then
-            record(m, "local", "CALL", "funcion-danina-bloqueada")
-            return
-        end
-    end
-
-    if setnamecallmethod then setnamecallmethod(m) end
-    return oldNamecall(self, ...)
-end)))
-
-local S = CFG.Spoof
-local oldIndex
-oldIndex = hookMeta("__index", mark(newcc(function(self, key)
-    if type(key) == "string" then
-        if key == "RequestInternal" and cancall and checkcaller() and isNetTarget(self) then
-            return mark(newcc(function(_, opts)
-                record(key, type(opts) == "table" and field(snapshot(opts, 0), "Url") or "?", "REQ", "request-interno")
-                return fakeResponse()
-            end))
-        elseif NET_M[key] and isNetTarget(self) then
-            local real = oldIndex(self, key)
-            if type(real) == "function" then
-                return mark(newcc(function(s, ...)
-                    local a = t_pack(...)
-                    local blocked, kind = inspectNet(key, a)
-                    if blocked then
-                        if kind == "table" then return fakeResponse() end
-                        return ""
-                    end
-                    return real(s, t_unpack(a, 1, a.n))
-                end))
-            end
-        elseif S.Enabled and cancall and not checkcaller() then
-            if self == game then
-                if S.PlaceId and key == "PlaceId" then return m_random(1000000, 9999999) end
-                if S.GameId and key == "GameId" then return m_random(1000000, 9999999) end
-                if S.JobId and key == "JobId" then return "00000000-0000-0000-0000-000000000000" end
-            elseif self == LP then
-                if S.UserId and key == "UserId" then return m_random(10000000, 99999999) end
-                if S.Name and (key == "Name" or key == "DisplayName") then
-                    return "Player_" .. m_random(1000, 9999)
-                end
-                if S.AccountAge and key == "AccountAge" then return m_random(100, 5000) end
-            end
-        end
-    end
-    return oldIndex(self, key)
-end)))
-
-local Baselines = {}
-
-local function watch(parent, key, name, kind)
-    Baselines[#Baselines + 1] = { parent = parent, key = key, value = parent[key], name = name, kind = kind or "global" }
-end
-
-local function resolve(path)
-    local cur, parent, last = genv, nil, nil
-    for part in s_gmatch(path, "[^.]+") do
-        if type(cur) ~= "table" then return end
-        parent, last, cur = cur, part, cur[part]
-    end
-    return parent, last, cur
-end
-
-local function safeSet(parent, key, value)
-    if pcall(function() parent[key] = value end) and parent[key] == value then return true end
-    if setreadonly then
-        local okRO, wasRO = true, true
-        if isreadonly then okRO, wasRO = pcall(isreadonly, parent) end
-        pcall(setreadonly, parent, false)
-        local ok = pcall(function() parent[key] = value end)
-        if okRO and wasRO then pcall(setreadonly, parent, true) end
-        if ok and parent[key] == value then return true end
-    end
-    return false
-end
-
-local function install(parent, key, fn, make)
-    if safeSet(parent, key, mark(newcc(make(fn)))) then return true end
-    if hookfn then
-        local holder
-        local w2 = mark(newcc(make(function(...) return holder(...) end)))
-        local ok, res = pcall(hookfn, fn, w2)
-        if ok and res then
-            holder = res
-            hooked[fn] = true
-            return true
-        end
-    end
-    warn("[Bladex Guard] no se pudo instalar hook en " .. tostring(key))
-    return false
-end
-
-local function hookRequest(path)
-    local parent, last, fn = resolve(path)
-    if type(fn) ~= "function" or hooked[fn] then return end
-    hooked[fn] = true
-    local old
-    local wrapper = mark(newcc(function(opts, ...)
-        if type(opts) == "table" then
-            local snap = snapshot(opts, 1)
-            if inspectOpts(path, snap) then return fakeResponse() end
-            return old(snap, ...)
-        end
-        return old(opts, ...)
-    end))
-    local done = false
-    if hookfn then
-        local ok, res = pcall(hookfn, fn, wrapper)
-        if ok then
-            old = res
-            done = true
-        end
-    end
-    if not done then
-        old = fn
-        if not safeSet(parent, last, wrapper) then
-            warn("[Bladex Guard] no se pudo proteger " .. path)
-            return
-        end
-    end
-    watch(parent, last, path)
-end
-
-local REQ_PATHS = {
-    "request", "http_request", "httprequest",
-    "syn.request", "fluxus.request", "http.request",
-}
-local SKIP = { request_internal = true, requestinternal = true }
-
-local function discover(tbl, prefix)
-    if type(tbl) ~= "table" then return end
-    for k, v in pairs(tbl) do
-        if type(k) == "string" and type(v) == "function" and not s_find(k, ".", 1, true)
-            and not SKIP[s_lower(k)] and s_find(s_lower(k), "request", 1, true) then
-            REQ_PATHS[#REQ_PATHS + 1] = prefix .. k
-        end
-    end
-end
-
-pcall(discover, genv, "")
-for _, name in ipairs({ "syn", "http", "fluxus", "krnl", "Fluxus", "Krnl" }) do
-    pcall(discover, genv[name], name .. ".")
-end
-
-do
-    local seen = {}
-    for _, p in ipairs(REQ_PATHS) do
-        if not seen[p] then
-            seen[p] = true
-            hookRequest(p)
-        end
-    end
-end
-
-for _, name in ipairs({ "request_internal", "RequestInternal" }) do
-    if type(genv[name]) == "function" then
-        safeSet(genv, name, mark(newcc(function(opts, ...)
-            if type(opts) == "table" then
-                local snap = snapshot(opts, 0)
-                record(name, field(snap, "Url") or "?", field(snap, "Method") or "GET", "request-interno")
-            end
-            return fakeResponse()
-        end)))
-        watch(genv, name, name)
-    end
-end
-
-local function wrapSocket(sock, trusted, path)
-    if not CFG.WrapWebSocket then return sock end
-    local t = type(sock)
-    if t ~= "table" and t ~= "userdata" then return sock end
-    return setmetatable({}, {
-        __index = function(_, k)
-            local v = sock[k]
-            if type(v) ~= "function" then return v end
-            if k == "Send" or k == "send" then
-                return function(_, data, ...)
-                    local blocked, reason = scanPayload(data, not trusted)
-                    if blocked then
-                        record(path .. ".Send", "websocket", "WS", reason)
-                        return
-                    end
-                    return v(sock, data, ...)
-                end
-            end
-            return function(_, ...) return v(sock, ...) end
-        end,
-        __newindex = function(_, k, val) sock[k] = val end,
-    })
-end
-
-if CFG.BlockWebSocket then
-    for _, path in ipairs({ "WebSocket.connect", "WebSocket.Connect", "syn.websocket.connect" }) do
-        local parent, last, fn = resolve(path)
-        if type(fn) == "function" then
-            local installed = install(parent, last, fn, function(orig)
-                return function(url, ...)
-                    if inspect(path, url, "WS", "x") then
-                        error("[Bladex Guard] conexion WebSocket bloqueada", 2)
-                    end
-                    local sock = orig(url, ...)
-                    local trusted = true
-                    if type(url) == "string" then
-                        local host = parseUrl(cleanUrl(url))
-                        trusted = hostIn(host, UserAllow) ~= nil or hostIn(host, TRUSTED_HOSTS) ~= nil
-                    end
-                    return wrapSocket(sock, trusted, path)
-                end
-            end)
-            if installed then watch(parent, last, path) end
-        end
-    end
-end
-
-local CHUNK = 262144
-
-local function deepHostile(code)
-    local n = #code
-    if n > CFG.MaxScan then return false, true end
-    local budget = { n = CFG.DecodeBudget }
-    local pos = 1
-    while pos <= n do
-        local chunk = s_sub(code, pos, pos + CHUNK + 511)
-        if hasAny(expand(chunk, budget), HOSTILE_NEEDLES) then return true, false end
-        pos = pos + CHUNK
-    end
-    return false, budget.n <= 0
-end
-
-local OBF_SIGS = {
-    "luraph", "moonsec", "ironbrew", "prometheus", "wearedevs", "luaobfuscator",
-    "obfuscated", "this file was protected", "protected using", "psu.dev", "aztup",
-}
-
-local function count(s, pat)
-    local _, n = s_gsub(s, pat, "")
-    return n
-end
-
-local function entropy(s)
-    local n = #s
-    if n == 0 then return 0 end
-    local step = n > 16384 and m_floor(n / 16384) or 1
-    local c, total = {}, 0
-    for i = 1, n, step do
-        local b = s_byte(s, i)
-        c[b] = (c[b] or 0) + 1
-        total = total + 1
-    end
-    local e = 0
-    for _, v in pairs(c) do
-        local p = v / total
-        e = e - p * (m_log(p) / m_log(2))
-    end
-    return e
-end
-
-local function analyzeObfuscation(code)
-    local sample = code
-    if #code > 60000 then
-        local mid = m_floor(#code / 2)
-        sample = s_sub(code, 1, 20000) .. "\n" .. s_sub(code, mid, mid + 19999) .. "\n" .. s_sub(code, -20000)
-    end
-    local score, why = 0, {}
-    local function add(n, r)
-        score = score + n
-        why[#why + 1] = r
-    end
-    local lc = s_lower(sample)
-    local n = #sample
-
-    for i = 1, #OBF_SIGS do
-        if s_find(lc, OBF_SIGS[i], 1, true) then add(4, "firma:" .. OBF_SIGS[i]) break end
-    end
-    local dec = count(sample, "\\%d%d?%d?")
-    if dec >= 60 then add(3, "escapes-decimales") elseif dec >= 20 then add(1, "escapes-decimales") end
-    if count(sample, "\\x%x%x") >= 30 then add(2, "escapes-hex") end
-    if count(sample, "%f[%w_][IlO_][Il1O0_][Il1O0_][Il1O0_][Il1O0_][Il1O0_]+%f[^%w_]") >= 8 then
-        add(3, "nombres-confusos")
-    end
-    if count(sample, "_0x%x%x%x+") >= 6 then add(3, "nombres-0x") end
-    if count(sample, "[Ll]_%d+_%d+") >= 10 then add(2, "locales-generados") end
-    if count(lc, "string%.char") + count(lc, "bxor") + count(lc, "bit32") >= 15 then add(2, "string.char/bxor") end
-    if count(lc, "select%s*%(%s*[\"']#[\"']") >= 2 then add(1, "vm-select") end
-    if s_find(lc, "[sg]etfenv") then add(1, "getfenv/setfenv") end
-    if s_find(s_sub(lc, 1, 400), "return%s*%(?%s*function%s*%(%.%.%.%)") then add(2, "envoltorio-vm") end
-    if count(sample, "%d+,%d+,%d+,%d+,%d+,%d+,%d+,%d+") >= 15 then add(2, "tablas-numericas") end
-    if count(lc, "loadstring") >= 2 then add(1, "loadstring-anidado") end
-    for run in s_gmatch(sample, "[%w%+/=]+") do
-        if #run >= 400 then add(2, "blob-base64") break end
-    end
-    if n >= 1000 then
-        local e = entropy(sample)
-        if e >= 5.7 then add(3, "entropia-alta") elseif e >= 5.3 then add(1, "entropia-media") end
-        local ws = count(sample, "%s")
-        if ws / n < 0.05 then add(1, "minificado") end
-        local lines = count(sample, "\n") + 1
-        if n / lines > 500 then add(1, "lineas-largas") end
-    end
-
-    local verdict = "limpio"
-    if score >= 7 then verdict = "ofuscado" elseif score >= 3 then verdict = "sospechoso" end
-    return verdict, score, why
-end
-
-local function inspectCode(source, code, blockHostile, blockObf)
-    local ok, hostile, incomplete = pcall(deepHostile, code)
-    if not ok then hostile, incomplete = false, true end
-
-    local verdict, score, why = "limpio", 0, {}
-    if CFG.DetectObfuscation then
-        local okA, v, s, w = pcall(analyzeObfuscation, code)
-        if okA then verdict, score, why = v, s, w end
-    end
-    if #code > CFG.MaxScan then
-        verdict = verdict == "limpio" and "sospechoso" or verdict
-        why[#why + 1] = "codigo-enorme"
-    elseif incomplete then
-        why[#why + 1] = "analisis-incompleto"
-        if verdict == "limpio" then verdict = "sospechoso" end
-    end
-
-    local block = false
-    if hostile then
-        record(source, "codigo", "LOAD", "codigo-sospechoso", not blockHostile)
-        taint(CFG.TaintWindow * 2)
-        block = blockHostile
-    end
-    if verdict ~= "limpio" then
-        local detail = "score=" .. score .. " " .. t_concat(why, ",")
-        record(source, "codigo", "LOAD",
-            verdict == "ofuscado" and "script-ofuscado" or "script-sospechoso-ofuscacion",
-            not (blockObf and verdict == "ofuscado"), detail)
-        if verdict == "ofuscado" or CFG.TaintOnSuspect then taint(CFG.TaintWindow) end
-        if blockObf and verdict == "ofuscado" then block = true end
-    end
-    return block
-end
-
-local origQueue
-for _, path in ipairs({ "queue_on_teleport", "queueonteleport", "syn.queue_on_teleport", "fluxus.queue_on_teleport" }) do
-    local parent, last, fn = resolve(path)
-    if type(fn) == "function" then
-        origQueue = origQueue or fn
-        local installed = install(parent, last, fn, function(orig)
-            return function(code, ...)
-                if type(code) == "string" and inspectCode(path, code, CFG.BlockHostileQueue, CFG.BlockObfuscatedQueue) then
-                    return
-                end
-                return orig(code, ...)
-            end
-        end)
-        if installed then watch(parent, last, path) end
-    end
-end
-
-local function pathIsDangerous(p)
-    if type(p) ~= "string" then return false end
-    local l = s_lower((s_gsub(p, "\\", "/")))
-    if s_find("/" .. l .. "/", "/%.%./") then return true end
-    if s_find(l, "autoexec", 1, true) then return true end
-    local ext = s_match(l, "%.([%w_]+)$")
-    return ext ~= nil and DANGEROUS_EXT[ext] == true
-end
-
-if CFG.ProtectFiles then
-    for _, name in ipairs({ "writefile", "appendfile" }) do
-        local orig = genv[name]
-        if type(orig) == "function" then
-            safeSet(genv, name, mark(newcc(function(path, ...)
-                if CFG.ProtectFiles and pathIsDangerous(path) then
-                    record(name, tostring(path), "WRITE", "persistencia-bloqueada")
-                    return
-                end
-                return orig(path, ...)
-            end)))
-            watch(genv, name, name)
-        end
-    end
-end
-
-for _, lname in ipairs({ "loadstring", "load" }) do
-    local origLoad = genv[lname] or (lname == "loadstring" and loadstring) or nil
-    if CFG.ScanLoadstring and type(origLoad) == "function" then
-        safeSet(genv, lname, mark(newcc(function(code, ...)
-            if CFG.ScanLoadstring and type(code) == "string" then
-                if inspectCode(lname, code, CFG.BlockHostileLoad, CFG.BlockObfuscatedLoad) then
-                    return nil, "bloqueado por Bladex Guard"
-                end
-            end
-            return origLoad(code, ...)
-        end)))
-        watch(genv, lname, lname)
-    end
-end
-
-if type(genv.restorefunction) == "function" then
-    local origRestore = genv.restorefunction
-    safeSet(genv, "restorefunction", mark(newcc(function(f, ...)
-        if protected(f) then return end
-        return origRestore(f, ...)
-    end)))
-end
-
-for _, name in ipairs({ "hookfunction", "hookfunc", "replaceclosure" }) do
-    local orig = genv[name]
-    if type(orig) == "function" then
-        safeSet(genv, name, mark(newcc(function(target, ...)
-            if type(target) == "function" and protected(target) then
-                record(name, "hook-guard", "HOOK", "hook-bloqueado")
-                return target
-            end
-            return orig(target, ...)
-        end)))
-        watch(genv, name, name)
-    end
-end
-
-if getrawmetatable then
-    local ok, mt = pcall(getrawmetatable, game)
-    if ok and type(mt) == "table" then
-        for _, k in ipairs({ "__namecall", "__index" }) do
-            if mt[k] ~= nil then
-                hooked[mt[k]] = true
-                watch(mt, k, "game." .. k, "mt")
-            end
-        end
-    end
-end
-
-local INTROSPECT = {
-    "getupvalue", "getupvalues", "setupvalue",
-    "getconstant", "getconstants", "setconstant",
-    "getproto", "getprotos",
-}
-
-local function guardIntrospection(tbl)
-    if type(tbl) ~= "table" then return end
-    for _, name in ipairs(INTROSPECT) do
-        local orig = tbl[name]
-        if type(orig) == "function" then
-            local plural = s_sub(name, -1) == "s"
-            pcall(function()
-                tbl[name] = mark(newcc(function(f, ...)
-                    if CFG.ProtectInternals and type(f) == "function" and protected(f) then
-                        if plural then return {} end
-                        return nil
-                    end
-                    return orig(f, ...)
-                end))
-            end)
-        end
-    end
-end
-
-if CFG.ProtectInternals then
-    pcall(guardIntrospection, debug)
-    guardIntrospection(genv)
-end
-
-local function copyStats()
-    local r = {}
-    for k, v in pairs(Stats.reasons) do r[k] = v end
-    return { total = Stats.total, reasons = r }
-end
-
-local Guard = {
-    Config = CFG,
-    Allow = function(h) UserAllow[s_lower(h)] = true end,
-    Block = function(h) UserBlock[s_lower(h)] = true end,
-    AllowWebhook = function(prefix) UserWebhooks[cleanUrl(prefix)] = true end,
-    SetStrict = function(v) CFG.Strict = v and true or false end,
-    SetDebug = function(v) CFG.Debug = v and true or false end,
-    GetLog = function() return t_clone(Log) end,
-    GetStats = copyStats,
-    Test = function(url, method, body, headers)
-        local ok, blocked, reason = pcall(evaluate, url, method, body, headers)
-        return ok and blocked or false, reason
-    end,
-
-    Analyze = function(code)
-        if type(code) ~= "string" then return "limpio", 0, {} end
-        return analyzeObfuscation(code)
-    end,
-    ScanFile = function(path)
-        if type(readfile) ~= "function" then return nil, "readfile no disponible" end
-        local ok, code = pcall(readfile, path)
-        if not ok or type(code) ~= "string" then return nil, "no se pudo leer" end
-        local hostile = deepHostile(code)
-        local verdict, score, why = analyzeObfuscation(code)
-        return verdict, score, why, hostile
-    end,
-    PersistFile = function(path)
-        if not origQueue then return false end
-        return (pcall(origQueue, s_format("loadstring(readfile(%q))()", path)))
-    end,
-}
-
-local locked = setmetatable({}, {
-    __index = { GetStats = copyStats },
-    __newindex = function() end,
-    __metatable = "locked",
+genv.BladexGuard = setmetatable({}, {
+	__index = API,
+	__newindex = function() end,
+	__metatable = "BLADEX_GUARD_LOCKED",
 })
-if not safeSet(genv, "__BLADEX_GUARD", locked) then warn("[Bladex Guard] no se pudo publicar el marcador") end
-watch(genv, "__BLADEX_GUARD", "__BLADEX_GUARD")
 
-if CFG.Watchdog then
-    task.spawn(function()
-        while true do
-            task.wait(1)
-            for _, e in ipairs(Baselines) do
-                local ok, current = pcall(function() return e.parent[e.key] end)
-                if ok and current ~= e.value then
-                    record("watchdog", e.name, "CHANGE", "manipulacion-detectada")
-                    taint(CFG.TaintWindow)
-                    if CFG.RestoreTampered and e.kind == "global" then
-                        safeSet(e.parent, e.key, e.value)
-                    else
-                        e.value = current
-                    end
-                end
-            end
-        end
-    end)
-end
-
-print("[Bladex] Security Guard v4 activo")
-return Guard
+Log("INFO", "core", "BLADEX Guard v" .. API.Version .. " activo")
+return genv.BladexGuard
