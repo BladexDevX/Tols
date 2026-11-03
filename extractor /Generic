@@ -1,0 +1,131 @@
+-- Generic Extractor
+-- utilidades de red
+local function safeHttpGet(url)
+    local ok, res = pcall(function() return game:HttpGet(url) end)
+    if ok and type(res) == "string" and #res > 0 then
+        if not res:sub(1, 50):lower():find("<!doctype") and not res:sub(1, 50):lower():find("<html") then
+            return res 
+        end
+    end
+    
+    local req = (syn and syn.request) or (http and http.request) or http_request or request
+    if req then
+        local reqOk, reqRes = pcall(req, {
+            Url = url,
+            Method = "GET",
+            Headers = { ["User-Agent"] = "Roblox/WinInet" }
+        })
+        if reqOk and type(reqRes) == "table" and reqRes.StatusCode == 200 and reqRes.Body then 
+            return reqRes.Body 
+        end
+    end
+    return nil, "HTTP Fetch Failed"
+end
+
+local function extractURL(input)
+    if type(input) ~= "string" then return nil end
+    input = input:match("^%s*(.-)%s*$")
+    if input == "" then return nil end
+    local u = input:match("^(https?://%S+)$"); if u then return u end
+    u = input:match("[Hh]ttp[Gg]et%s*%(?%s*[\"']([^\"']+)[\"']"); if u then return u end
+    u = input:match("[Hh]ttp[Gg]et%s*%(?%s*%[=*%[([^%]]+)%]=*%]"); if u then return u end
+    u = input:match("[Hh]ttp[Gg]et[Aa]sync%s*%(?%s*[\"']([^\"']+)[\"']"); if u then return u end
+    u = input:match("[Uu]rl%s*=%s*[\"']([^\"']+)[\"']"); if u then return u end
+    u = input:match("(https?://[^%s\"'%)%]]+)"); if u then return u end
+    return nil
+end
+
+-- formato de tamaño
+local function formatSize(bytes)
+    if bytes >= 1024 * 1024 then
+        return string.format("%.2f MB", bytes / (1024 * 1024))
+    elseif bytes >= 1024 then
+        return string.format("%.2f KB", bytes / 1024)
+    else
+        return bytes .. " B"
+    end
+end
+
+-- extractor principal
+local function execGeneric(input)
+    task.spawn(function()
+        local okTop, errTop = pcall(function()
+            local url = extractURL(input)
+            local parsedHost = url and (url:match("^%a+://([^/%?#:]+)") or "generic") or "generic"
+            parsedHost = parsedHost:lower()
+            local DIR = EXTRACT_DIR .. "/" .. parsedHost
+            pcall(makefolder, DIR)
+
+            print("-- Iniciando extractor generico...")
+            print("-- Hooks activos para loadstring y HttpGet")
+
+            local layerCount = 0
+            local httpCount = 0
+            local oldLoad = loadstring
+
+            -- Hook a loadstring
+            getgenv().loadstring = function(s, ...)
+                if type(s) == "string" and #s > 500 then
+                    layerCount = layerCount + 1
+                    local path = DIR .. "/layer_" .. layerCount .. ".lua"
+                    if writefile then pcall(writefile, path, s) end
+                    print("-- Loadstring capturado | " .. formatSize(#s))
+                end
+                return oldLoad(s, ...)
+            end
+
+            -- Hook a HttpGet / RequestAsync
+            local oldNC
+            oldNC = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+                local method = getnamecallmethod()
+                if method == "HttpGet" or method == "HttpGetAsync" then
+                    local res = oldNC(self, ...)
+                    if type(res) == "string" and #res > 500 then
+                        httpCount = httpCount + 1
+                        local path = DIR .. "/http_" .. httpCount .. ".txt"
+                        if writefile then pcall(writefile, path, res) end
+                        print("-- HTTP capturado | " .. formatSize(#res))
+                    end
+                    return res
+                elseif method == "RequestAsync" then
+                    local res = oldNC(self, ...)
+                    if type(res) == "table" and type(res.Body) == "string" and #res.Body > 500 then
+                        httpCount = httpCount + 1
+                        local path = DIR .. "/request_" .. httpCount .. ".txt"
+                        if writefile then pcall(writefile, path, res.Body) end
+                        print("-- RequestAsync capturado | " .. formatSize(#res.Body))
+                    end
+                    return res
+                end
+                return oldNC(self, ...)
+            end))
+
+            print("-- Descargando loader principal...")
+            local src = safeHttpGet(url)
+            
+            if src then
+                print("-- Loader OK | " .. formatSize(#src))
+                local fn = oldLoad(src)
+                if fn then
+                    local execOk, execErr = pcall(fn)
+                    if not execOk then print("-- Error ejecutando loader: " .. tostring(execErr)) end
+                else
+                    print("-- Error compilando loader")
+                end
+            else
+                print("-- Error descargando loader")
+            end
+
+            -- Tiempo de gracia para capturar peticiones asíncronas
+            task.wait(5)
+            
+            getgenv().loadstring = oldLoad
+            hookmetamethod(game, "__namecall", oldNC)
+
+            print("-- Resumen: Capas: " .. layerCount .. " | HTTP: " .. httpCount)
+        end)
+        if not okTop then print("-- Error general: " .. tostring(errTop)) end
+    end)
+end
+
+return execGeneric
