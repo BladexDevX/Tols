@@ -70,9 +70,8 @@ local function execSquareWeb(input)
         local oldLoadstring = loadstring
         local captured = false
 
-        getgenv().loadstring = function(code, chunkname)
+        local function myLoadstring(code, chunkname)
             if type(code) == "string" then
-                -- Verificamos que sea un código grande (la carga útil final) y no la capa de protección
                 if #code > 500 and not code:find("local KA%s*=%s*{") and not code:find("V3nt v3") then
                     local outPath = DIR .. "/V3nt_FINAL.lua"
                     if writefile then 
@@ -80,9 +79,35 @@ local function execSquareWeb(input)
                         print("-- ¡CÓDIGO FINAL EXTRAÍDO! | " .. formatSize(#code))
                         captured = true
                     end
+                    return function() end
                 end
             end
             return oldLoadstring(code, chunkname)
+        end
+
+        local safeHook = myLoadstring
+        if newcclosure then
+            safeHook = newcclosure(myLoadstring)
+        end
+
+        if hookfunction then
+            pcall(hookfunction, loadstring, safeHook)
+            if getgenv().loadstring then
+                pcall(hookfunction, getgenv().loadstring, safeHook)
+            end
+        else
+            getgenv().loadstring = safeHook
+        end
+
+        local dummyRestore = function(f) return f end
+        if hookfunction then
+            if restorefunction then pcall(hookfunction, restorefunction, dummyRestore) end
+            if restoreclosure then pcall(hookfunction, restoreclosure, dummyRestore) end
+            if restorefunc then pcall(hookfunction, restorefunc, dummyRestore) end
+        else
+            getgenv().restorefunction = dummyRestore
+            getgenv().restoreclosure = dummyRestore
+            getgenv().restorefunc = dummyRestore
         end
 
         local src = safeHttpGet(url)
@@ -94,9 +119,13 @@ local function execSquareWeb(input)
             print("-- Error al descargar loader inicial")
         end
 
-        -- Damos un margen de tiempo para que el script original termine de descargar y descifrar
         task.wait(2)
-        getgenv().loadstring = oldLoadstring
+        
+        if hookfunction then
+            pcall(hookfunction, loadstring, oldLoadstring)
+        else
+            getgenv().loadstring = oldLoadstring
+        end
 
         if not captured then
             print("-- Error: No se pudo capturar el código final.")
