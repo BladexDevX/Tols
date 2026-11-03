@@ -1,6 +1,12 @@
--- servicios
+-- services
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
+
+-- urls
+local URL_ICON_LOADER = "https://raw.githubusercontent.com/BladexDevX/loader/refs/heads/main/BladexIconLoader"
+local URL_F9         = "https://raw.githubusercontent.com/bladexhub/Tols/refs/heads/main/f9/f9"
+local URL_EXTRACTOR  = "https://raw.githubusercontent.com/bladexhub/Tols/refs/heads/main/extractor%20/extractor" -- URL cambiada
+local URL_SPY        = "https://rawscripts.net/raw/Universal-Script-Simple-Spy-V3-Mobile-53593"
 
 -- iconos
 local ICONS = {
@@ -8,13 +14,10 @@ local ICONS = {
     ["code"] = "",
     ["spy"] = "",
     ["atlas"] = "",
-    ["info"] = ""
+    ["settings"] = ""
 }
 
--- url loader
-local URL_LOADER = "https://raw.githubusercontent.com/BladexDevX/loader/refs/heads/main/BladexIconLoader"
-
--- http
+-- descargar
 local function fetch(url)
     local ok, res = pcall(game.HttpGet, game, url)
     if ok and type(res) == "string" and #res > 0 then
@@ -23,10 +26,10 @@ local function fetch(url)
     return nil
 end
 
--- loader
+-- cargar loader
 local IconLoader = nil
 pcall(function()
-    local source = fetch(URL_LOADER)
+    local source = fetch(URL_ICON_LOADER)
     if not source then return end
     local fn = loadstring(source)
     if not fn then return end
@@ -36,7 +39,7 @@ pcall(function()
     end
 end)
 
--- resolver
+-- buscar icono
 local function resolveIcon(name)
     if not name or name == "" then return nil end
     if IconLoader then
@@ -48,14 +51,14 @@ local function resolveIcon(name)
     return nil
 end
 
--- resolver todo
+-- asignar iconos
 ICONS["square-terminal"] = resolveIcon("square-terminal") or ""
 ICONS["code"]            = resolveIcon("code")            or ""
 ICONS["spy"]             = resolveIcon("venetian-mask")   or ""
 ICONS["atlas"]           = resolveIcon("atlas")           or ""
-ICONS["info"]            = resolveIcon("info")            or ""
+ICONS["settings"]        = resolveIcon("settings") or resolveIcon("cog") or resolveIcon("gear") or ""
 
--- blanco
+-- color
 local WHITE = Color3.fromRGB(255, 255, 255)
 
 -- items
@@ -63,13 +66,21 @@ local ITEMS = {
     {name = "F9",                   icon = ICONS["square-terminal"], atlas = false},
     {name = "EXTRACTOR",            icon = ICONS["code"],            atlas = false},
     {name = "SPY",                  icon = ICONS["spy"],             atlas = false},
-    {name = "Click part to select", icon = ICONS["atlas"],           atlas = true, offset = 6},
-    {name = "Notepad",              icon = ICONS["atlas"],           atlas = true, offset = 2},
-    {name = "Console",              icon = ICONS["atlas"],           atlas = true, offset = 4},
-    {name = "Save Instance",        icon = ICONS["atlas"],           atlas = true, offset = 3}
+    {name = "Próximamente",         icon = ICONS["atlas"],           atlas = true, offset = 6},
+    {name = "Próximamente",         icon = ICONS["atlas"],           atlas = true, offset = 2},
+    {name = "Próximamente",         icon = ICONS["atlas"],           atlas = true, offset = 4},
+    {name = "Próximamente",         icon = ICONS["atlas"],           atlas = true, offset = 3}
 }
 
--- gui padre
+-- altura auto
+local ITEMS_PER_ROW = 4
+local CELL_HEIGHT = 85
+local CELL_PADDING_Y = 6
+local totalRows = math.ceil(#ITEMS / ITEMS_PER_ROW)
+local gridHeight = (totalRows * CELL_HEIGHT) + ((totalRows - 1) * CELL_PADDING_Y)
+local calculatedHeight = 10 + gridHeight + 10 + 30
+
+-- padre ui
 local guiParent
 pcall(function()
     guiParent = game:GetService("CoreGui")
@@ -80,11 +91,9 @@ end
 
 -- limpiar
 local old = guiParent:FindFirstChild("BladexHUD")
-if old then
-    old:Destroy()
-end
+if old then old:Destroy() end
 
--- screen gui
+-- screen
 local ScreenGui = Instance.new("ScreenGui")
 ScreenGui.Name = "BladexHUD"
 ScreenGui.IgnoreGuiInset = true
@@ -92,21 +101,17 @@ ScreenGui.ResetOnSpawn = false
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 ScreenGui.Parent = guiParent
 
--- cámara
-local Camera = workspace.CurrentCamera
-
 -- escala
+local Camera = workspace.CurrentCamera
 local UIScale = Instance.new("UIScale")
 UIScale.Name = "DeviceScale"
 UIScale.Parent = ScreenGui
 
--- config escala
 local BASE_WIDTH = 1280
 local BASE_HEIGHT = 720
 local MIN_SCALE = 0.72
 local MAX_SCALE = 1.08
 
--- act escala
 local function updateDeviceScale()
     Camera = workspace.CurrentCamera
     if not Camera then return end
@@ -118,20 +123,14 @@ local function updateDeviceScale()
 end
 
 updateDeviceScale()
-
-if Camera then
-    Camera:GetPropertyChangedSignal("ViewportSize"):Connect(updateDeviceScale)
-end
-
+if Camera then Camera:GetPropertyChangedSignal("ViewportSize"):Connect(updateDeviceScale) end
 workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(function()
     Camera = workspace.CurrentCamera
     updateDeviceScale()
-    if Camera then
-        Camera:GetPropertyChangedSignal("ViewportSize"):Connect(updateDeviceScale)
-    end
+    if Camera then Camera:GetPropertyChangedSignal("ViewportSize"):Connect(updateDeviceScale) end
 end)
 
--- botón
+-- boton top
 local OpenButton = Instance.new("TextButton")
 OpenButton.Name = "Bladex"
 OpenButton.AnchorPoint = Vector2.new(0.5, 0)
@@ -146,67 +145,67 @@ OpenButton.TextColor3 = Color3.fromRGB(236, 236, 240)
 OpenButton.TextSize = 14
 OpenButton.Parent = ScreenGui
 
--- bordes
+-- bordes boton
 local OpenCorner = Instance.new("UICorner")
 OpenCorner.CornerRadius = UDim.new(1, 0)
 OpenCorner.Parent = OpenButton
 
--- borde
 local OpenStroke = Instance.new("UIStroke")
 OpenStroke.Color = Color3.fromRGB(54, 54, 66)
 OpenStroke.Transparency = 0.25
 OpenStroke.Thickness = 1
 OpenStroke.Parent = OpenButton
 
--- marco
+-- panel
 local MainFrame = Instance.new("Frame")
 MainFrame.Name = "MainFrame"
 MainFrame.AnchorPoint = Vector2.new(0.5, 0)
 MainFrame.Position = UDim2.new(0.5, 0, 0, 52)
-MainFrame.Size = UDim2.new(0, 300, 0, 360)
+MainFrame.Size = UDim2.new(0, 300, 0, calculatedHeight)
 MainFrame.BackgroundColor3 = Color3.fromRGB(22, 22, 28)
 MainFrame.BorderSizePixel = 0
 MainFrame.Visible = false
 MainFrame.ClipsDescendants = true
 MainFrame.Parent = ScreenGui
 
--- bordes
+-- bordes panel
 local MainCorner = Instance.new("UICorner")
 MainCorner.CornerRadius = UDim.new(0, 15)
 MainCorner.Parent = MainFrame
 
--- borde
 local MainStroke = Instance.new("UIStroke")
 MainStroke.Color = Color3.fromRGB(50, 50, 62)
 MainStroke.Transparency = 0.25
 MainStroke.Thickness = 1
 MainStroke.Parent = MainFrame
 
--- apps
+-- contenedor
 local Apps = Instance.new("Frame")
 Apps.Name = "Apps"
 Apps.BackgroundTransparency = 1
 Apps.Position = UDim2.new(0, 10, 0, 10)
-Apps.Size = UDim2.new(1, -20, 1, -40)
+Apps.Size = UDim2.new(1, -20, 0, gridHeight)
 Apps.Parent = MainFrame
 
 -- grid
 local Grid = Instance.new("UIGridLayout")
-Grid.CellSize = UDim2.new(0, 84, 0, 98)
-Grid.CellPadding = UDim2.new(0, 8, 0, 5)
+Grid.CellSize = UDim2.new(0, 66, 0, CELL_HEIGHT)
+Grid.CellPadding = UDim2.new(0, 4, 0, CELL_PADDING_Y)
 Grid.HorizontalAlignment = Enum.HorizontalAlignment.Center
 Grid.VerticalAlignment = Enum.VerticalAlignment.Top
 Grid.SortOrder = Enum.SortOrder.LayoutOrder
 Grid.Parent = Apps
 
--- bucle
+-- bucle items
 for index, item in ipairs(ITEMS) do
+    -- holder
     local holder = Instance.new("Frame")
-    holder.Name = item.name
+    holder.Name = item.name .. index
     holder.BackgroundTransparency = 1
     holder.LayoutOrder = index
     holder.Parent = Apps
 
+    -- boton
     local button = Instance.new("TextButton")
     button.Name = "Button"
     button.Size = UDim2.new(1, 0, 1, 0)
@@ -221,15 +220,17 @@ for index, item in ipairs(ITEMS) do
     corner.CornerRadius = UDim.new(0, 10)
     corner.Parent = button
 
+    -- icono
     local icon = Instance.new("ImageLabel")
     icon.Name = "Icon"
     icon.BackgroundTransparency = 1
     icon.ImageColor3 = WHITE
-    icon.Position = UDim2.new(0.5, -22, 0, 8)
-    icon.Size = UDim2.new(0, 44, 0, 44)
+    icon.Position = UDim2.new(0.5, -16, 0, 8)
+    icon.Size = UDim2.new(0, 32, 0, 32)
     icon.ScaleType = Enum.ScaleType.Fit
     icon.Parent = button
 
+    -- recorte
     if item.atlas then
         icon.Image = item.icon
         icon.ImageRectSize = Vector2.new(32, 32)
@@ -238,19 +239,21 @@ for index, item in ipairs(ITEMS) do
         icon.Image = item.icon
     end
 
+    -- texto
     local label = Instance.new("TextLabel")
     label.Name = "Label"
     label.BackgroundTransparency = 1
-    label.Position = UDim2.new(0, 2, 0, 57)
-    label.Size = UDim2.new(1, -4, 0, 38)
+    label.Position = UDim2.new(0, 0, 0, 44)
+    label.Size = UDim2.new(1, 0, 0, 34)
     label.Font = Enum.Font.Gotham
     label.Text = item.name
     label.TextColor3 = Color3.fromRGB(230, 230, 236)
-    label.TextSize = 12
+    label.TextSize = 9
     label.TextWrapped = true
     label.TextYAlignment = Enum.TextYAlignment.Top
     label.Parent = button
 
+    -- hover
     button.MouseEnter:Connect(function()
         TweenService:Create(button, TweenInfo.new(0.15), {
             BackgroundTransparency = 0,
@@ -265,47 +268,49 @@ for index, item in ipairs(ITEMS) do
     end)
 end
 
+-- clicks
+local function getButton(itemName)
+    for _, v in pairs(Apps:GetChildren()) do
+        if v:IsA("Frame") and string.find(v.Name, itemName) then
+            return v:FindFirstChild("Button")
+        end
+    end
+    return nil
+end
+
 -- f9
-local consoleButton = Apps:FindFirstChild("F9")
+local consoleButton = getButton("F9")
 if consoleButton then
-    consoleButton.Button.MouseButton1Click:Connect(function()
+    consoleButton.MouseButton1Click:Connect(function()
         pcall(function()
-            local f9Source = fetch("https://raw.githubusercontent.com/bladexhub/Tols/refs/heads/main/f9/f9")
-            if not f9Source then return end
-            local f9Func = loadstring(f9Source)
-            if f9Func then
-                f9Func()
-            end
+            local source = fetch(URL_F9)
+            if source then loadstring(source)() end
         end)
     end)
 end
 
 -- extractor
-local extractorButton = Apps:FindFirstChild("EXTRACTOR")
+local extractorButton = getButton("EXTRACTOR")
 if extractorButton then
-    extractorButton.Button.MouseButton1Click:Connect(function()
+    extractorButton.MouseButton1Click:Connect(function()
         pcall(function()
-            local extractorSource = fetch("https://raw.githubusercontent.com/bladexhub/Tols/refs/heads/main/extractor%20/ui")
-            if not extractorSource then return end
-            local extractorFunc = loadstring(extractorSource)
-            if extractorFunc then
-                extractorFunc()
-            end
+            local source = fetch(URL_EXTRACTOR)
+            if source then loadstring(source)() end
         end)
     end)
 end
 
 -- spy
-local spyButton = Apps:FindFirstChild("SPY")
+local spyButton = getButton("SPY")
 if spyButton then
-    spyButton.Button.MouseButton1Click:Connect(function()
+    spyButton.MouseButton1Click:Connect(function()
         pcall(function()
-            loadstring(game:HttpGet("https://rawscripts.net/raw/Universal-Script-Simple-Spy-V3-Mobile-53593"))()
+            loadstring(game:HttpGet(URL_SPY))()
         end)
     end)
 end
 
--- fondo
+-- barra inferior
 local Bottom = Instance.new("Frame")
 Bottom.Name = "Bottom"
 Bottom.BackgroundColor3 = Color3.fromRGB(28, 28, 36)
@@ -314,12 +319,11 @@ Bottom.Position = UDim2.new(0, 0, 1, -30)
 Bottom.Size = UDim2.new(1, 0, 0, 30)
 Bottom.Parent = MainFrame
 
--- bordes
 local BottomCorner = Instance.new("UICorner")
 BottomCorner.CornerRadius = UDim.new(0, 15)
 BottomCorner.Parent = Bottom
 
--- línea
+-- linea
 local Line = Instance.new("Frame")
 Line.BackgroundColor3 = Color3.fromRGB(46, 46, 56)
 Line.BorderSizePixel = 0
@@ -327,24 +331,24 @@ Line.Position = UDim2.new(0, 10, 0, -1)
 Line.Size = UDim2.new(1, -20, 0, 1)
 Line.Parent = Bottom
 
--- icono info
-local Info = Instance.new("ImageLabel")
-Info.Name = "Info"
-Info.BackgroundTransparency = 1
-Info.Image = ICONS["info"]
-Info.ImageColor3 = WHITE
-Info.ImageTransparency = 0.15
-Info.Position = UDim2.new(1, -27, 0, 5)
-Info.Size = UDim2.new(0, 20, 0, 20)
-Info.Parent = Bottom
+-- icono ajustes
+local SettingsIcon = Instance.new("ImageLabel")
+SettingsIcon.Name = "Settings"
+SettingsIcon.BackgroundTransparency = 1
+SettingsIcon.Image = ICONS["settings"]
+SettingsIcon.ImageColor3 = WHITE
+SettingsIcon.ImageTransparency = 0.15
+SettingsIcon.Position = UDim2.new(1, -27, 0, 5)
+SettingsIcon.Size = UDim2.new(0, 20, 0, 20)
+SettingsIcon.Parent = Bottom
 
--- estado
+-- estados
 local open = false
 local busy = false
-local openSize = UDim2.new(0, 300, 0, 360)
+local openSize = UDim2.new(0, 300, 0, calculatedHeight)
 local closedSize = UDim2.new(0, 0, 0, 0)
 
--- abrir/cerrar
+-- animacion abrir
 local function setOpen(state)
     if busy then return end
     if state == open then return end
@@ -356,46 +360,27 @@ local function setOpen(state)
     if state then
         MainFrame.Visible = true
         MainFrame.Size = closedSize
-
-        local tween = TweenService:Create(
-            MainFrame,
-            TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out),
-            { Size = openSize }
-        )
+        local tween = TweenService:Create(MainFrame, TweenInfo.new(0.3, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), { Size = openSize })
         tween:Play()
-        tween.Completed:Connect(function()
-            busy = false
-        end)
+        tween.Completed:Connect(function() busy = false end)
     else
-        local tween = TweenService:Create(
-            MainFrame,
-            TweenInfo.new(0.25, Enum.EasingStyle.Quart, Enum.EasingDirection.In),
-            { Size = closedSize }
-        )
+        local tween = TweenService:Create(MainFrame, TweenInfo.new(0.25, Enum.EasingStyle.Quart, Enum.EasingDirection.In), { Size = closedSize })
         tween:Play()
         tween.Completed:Connect(function()
-            if not open then
-                MainFrame.Visible = false
-            end
+            if not open then MainFrame.Visible = false end
             busy = false
         end)
     end
 end
 
--- click
-OpenButton.MouseButton1Click:Connect(function()
-    setOpen(not open)
-end)
+-- click abrir
+OpenButton.MouseButton1Click:Connect(function() setOpen(not open) end)
 
--- hover
+-- hover abrir
 OpenButton.MouseEnter:Connect(function()
-    TweenService:Create(OpenButton, TweenInfo.new(0.15), {
-        BackgroundColor3 = Color3.fromRGB(26, 26, 34)
-    }):Play()
+    TweenService:Create(OpenButton, TweenInfo.new(0.15), { BackgroundColor3 = Color3.fromRGB(26, 26, 34) }):Play()
 end)
 
 OpenButton.MouseLeave:Connect(function()
-    TweenService:Create(OpenButton, TweenInfo.new(0.15), {
-        BackgroundColor3 = Color3.fromRGB(14, 14, 20)
-    }):Play()
+    TweenService:Create(OpenButton, TweenInfo.new(0.15), { BackgroundColor3 = Color3.fromRGB(14, 14, 20) }):Play()
 end)
