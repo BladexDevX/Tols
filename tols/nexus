@@ -5,7 +5,7 @@ local TweenService = game:GetService("TweenService")
 -- urls
 local URL_ICON_LOADER = "https://raw.githubusercontent.com/BladexDevX/loader/refs/heads/main/BladexIconLoader"
 local URL_F9         = "https://raw.githubusercontent.com/bladexhub/Tols/refs/heads/main/f9/f9"
-local URL_EXTRACTOR  = "https://raw.githubusercontent.com/bladexhub/Tols/refs/heads/main/extractor%20/extractor" -- URL cambiada
+local URL_EXTRACTOR  = "https://raw.githubusercontent.com/bladexhub/Tols/refs/heads/main/extractor%20/extractor"
 local URL_SPY        = "https://rawscripts.net/raw/Universal-Script-Simple-Spy-V3-Mobile-53593"
 
 -- iconos
@@ -61,7 +61,7 @@ ICONS["settings"]        = resolveIcon("settings") or resolveIcon("cog") or reso
 -- color
 local WHITE = Color3.fromRGB(255, 255, 255)
 
--- items
+-- items (8 iconos: 4 arriba, 4 abajo)
 local ITEMS = {
     {name = "F9",                   icon = ICONS["square-terminal"], atlas = false},
     {name = "EXTRACTOR",            icon = ICONS["code"],            atlas = false},
@@ -69,7 +69,8 @@ local ITEMS = {
     {name = "Próximamente",         icon = ICONS["atlas"],           atlas = true, offset = 6},
     {name = "Próximamente",         icon = ICONS["atlas"],           atlas = true, offset = 2},
     {name = "Próximamente",         icon = ICONS["atlas"],           atlas = true, offset = 4},
-    {name = "Próximamente",         icon = ICONS["atlas"],           atlas = true, offset = 3}
+    {name = "Próximamente",         icon = ICONS["atlas"],           atlas = true, offset = 3},
+    {name = "Próximamente",         icon = ICONS["atlas"],           atlas = true, offset = 5}
 }
 
 -- altura auto
