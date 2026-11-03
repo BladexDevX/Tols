@@ -54,327 +54,54 @@ local function formatSize(bytes)
     end
 end
 
-local function execSquareWebV1(input)
+local function execSquareWeb(input)
     task.spawn(function()
-        local okTop, errTop = pcall(function()
-            local url = extractURL(input)
-            local parsedHost = url and (url:match("^%a+://([^/%?#:]+)") or "desconocido") or "desconocido"
-            parsedHost = parsedHost:lower()
-            local DIR = EXTRACT_DIR .. "/" .. parsedHost
-            pcall(makefolder, DIR)
+        local url = extractURL(input)
+        if not url then 
+            print("-- Error: URL invalido")
+            return 
+        end
 
-            print("-- Iniciando extraccion V1...")
+        print("-- SquareWeb V3nt detectado. Iniciando extraccion...")
+        local parsedHost = url:match("^%a+://([^/%?#:]+)") or "desconocido"
+        local DIR = EXTRACT_DIR .. "/" .. parsedHost:lower()
+        pcall(makefolder, DIR)
 
-            local LOADER_URL = url
-            local layers, lsDepth = 0, 0
+        local oldLoadstring = loadstring
+        local captured = false
 
-            local function pathFor(n) return DIR .. "/layer_" .. n .. ".lua" end
-
-            local function hookfn(tbl, name, factory)
-                if not tbl then return false end
-                local f = tbl[name]
-                if type(f) ~= "function" then return false end
-                local ref = { f }
-                local w = factory(function(...) return ref[1](...) end)
-                if newcclosure then
-                    local ok, wc = pcall(newcclosure, w)
-                    if ok then w = wc end
-                end
-                if hookfunction then
-                    local ok, orig = pcall(hookfunction, f, w)
-                    if ok and type(orig) == "function" then
-                        ref[1] = orig; return true
-                    end
-                end
-                ref[1] = f; tbl[name] = w; return true
-            end
-
-            hookfn(getgenv(), "loadstring", function(orig)
-                return function(s, ...)
-                    if type(s) == "string" and #s < 50 then return orig(s, ...) end
-                    
-                    if type(s) == "string" and #s > 1000000 then
-                        print("-- Capa ignorada | " .. formatSize(#s))
-                        return function() end
-                    end
-                    
-                    if lsDepth > 0 then
-                        local res = table.pack(pcall(orig, s, ...))
-                        if not res[1] or not res[2] then return function() end end
-                        return table.unpack(res, 2, res.n)
-                    end
-                    
-                    lsDepth = lsDepth + 1
-                    layers = layers + 1
-                    local t = tostring(s)
-                    
-                    local outPath = pathFor(layers)
-                    if pcall(writefile, outPath, t) then
-                        print("-- Capa " .. layers .. " guardada | " .. formatSize(#t))
-                    end
-                    
-                    local res = table.pack(pcall(orig, s, ...))
-                    lsDepth = lsDepth - 1
-                    if not res[1] then error(res[2], 0) end
-                    if not res[2] then return function() end end
-                    return table.unpack(res, 2, res.n)
-                end
-            end)
-
-            print("-- Descargando loader V1...")
-            local src, fromCache = safeHttpGet(LOADER_URL)
-            if src then
-                print("-- Loader OK | " .. formatSize(#src))
-                local fn = loadstring(src)
-                if fn then pcall(fn) end
-            else
-                print("-- Error al descargar loader")
-            end
-            
-            task.wait(2)
-            print("-- Resumen V1: Capas extraidas -> " .. layers)
-        end)
-        if not okTop then print("-- Error V1: " .. tostring(errTop)) end
-    end)
-end
-
-local function execSquareWebV2(url, input)
-    task.spawn(function()
-        local attempt = 1
-        local success = false
-        local useCache = true
-        
-        while attempt <= 2 and not success do
-            local okTop, errTop = pcall(function()
-                local parsedHost = url and (url:match("^%a+://([^/%?#:]+)") or "desconocido") or "desconocido"
-                parsedHost = parsedHost:lower()
-                local DIR = EXTRACT_DIR .. "/" .. parsedHost
-                pcall(makefolder, DIR)
-
-                print("-- Iniciando extraccion V2 (Intento "..attempt..")...")
-
-                local l2Path = DIR .. "/layer2.lua"
-                local layer2Content, l2Cached = nil, false
-
-                if useCache and isfile and isfile(l2Path) then
-                    local ok, c = pcall(readfile, l2Path)
-                    if ok and type(c) == "string" and #c > 200 then
-                        layer2Content = c; l2Cached = true
-                        print("-- Capa 2 desde cache | " .. formatSize(#c))
-                    end
-                end
-
-                local l3, R, l8 = nil, {}, nil
-                local KA, U, KURL, SEED2
-                local hookActive = true
-                local oldNC
-
-                oldNC = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
-                    if not hookActive then return oldNC(self, ...) end
-                    local m = getnamecallmethod()
-                    if m == "HttpGet" or m == "HttpGetAsync" then
-                        local a1 = ...
-                        local res = oldNC(self, ...)
-                        
-                        if type(res) == "string" then
-                            if not layer2Content and #res > 200 then
-                                local hits = 0
-                                if res:find("KURL", 1, true) then hits = hits + 1 end
-                                if res:find("SEED2", 1, true) then hits = hits + 1 end
-                                if res:find("KA%s*=") then hits = hits + 1 end
-                                if res:find("U%s*=%s*{") then hits = hits + 1 end
-                                if hits >= 2 then
-                                    layer2Content = res
-                                    if writefile then pcall(writefile, l2Path, res) end
-                                    print("-- Capa 2 interceptada | " .. formatSize(#res))
-                                    
-                                    local KA_str = layer2Content:match("KA%s*=%s*{([^}]+)}")
-                                    local U_str  = layer2Content:match("U%s*=%s*{([^}]+)}") or layer2Content:match("local U%s*=%s*{(.-)}")
-                                    KURL   = layer2Content:match("KURL%s*=%s*[\"'](.-)[\"']")
-                                    SEED2  = tonumber(layer2Content:match("SEED2%s*=%s*(%d+)"))
-                                    
-                                    if KA_str and U_str and KURL and SEED2 then
-                                        KA = {}
-                                        for num in KA_str:gmatch("%d+") do table.insert(KA, tonumber(num)) end
-                                        U = {}
-                                        for u in U_str:gmatch('"(.-)"') do table.insert(U, u) end
-                                        if #U == 0 then
-                                            for u in U_str:gmatch("'(.-)'") do table.insert(U, u) end
-                                        end
-                                    end
-                                end
-                            elseif layer2Content and type(a1) == "string" and U then
-                                if a1 == U[1] then
-                                    l3 = res
-                                elseif KURL and a1:find(KURL, 1, true) then
-                                    l8 = res
-                                else
-                                    for i = 2, #U do
-                                        if a1 == U[i] then R[i] = res end
-                                    end
-                                end
-                            end
-                        end
-                        return res
-                    end
-                    return oldNC(self, ...)
-                end))
-
-                if not layer2Content then
-                    if delfile and isfile and isfile(l2Path) then pcall(delfile, l2Path) end
-                    print("-- Ejecutando loader principal...")
-                    
-                    local src, fromCache = safeHttpGet(url)
-                    if src then
-                        local fn = loadstring(src)
-                        if fn then pcall(fn) end
-                    else
-                        error("Error descargando loader.")
-                    end
-
-                    local timeout = 15
-                    while not layer2Content and timeout > 0 do
-                        task.wait(1); timeout = timeout - 1
-                    end
-                    
-                    if not layer2Content then error("Timeout Capa 2.") end
-                else
-                    local KA_str = layer2Content:match("KA%s*=%s*{([^}]+)}")
-                    local U_str  = layer2Content:match("U%s*=%s*{([^}]+)}") or layer2Content:match("local U%s*=%s*{(.-)}")
-                    KURL   = layer2Content:match("KURL%s*=%s*[\"'](.-)[\"']")
-                    SEED2  = tonumber(layer2Content:match("SEED2%s*=%s*(%d+)"))
-                    
-                    if KA_str and U_str and KURL and SEED2 then
-                        KA = {}
-                        for num in KA_str:gmatch("%d+") do table.insert(KA, tonumber(num)) end
-                        U = {}
-                        for u in U_str:gmatch('"(.-)"') do table.insert(U, u) end
-                        if #U == 0 then
-                            for u in U_str:gmatch("'(.-)'") do table.insert(U, u) end
-                        end
-                    end
-                end
-
-                if not (KA and U and KURL and SEED2) then error("Error Capa 2.") end
-
-                print("-- Esperando intercepcion...")
-                local timeout2 = 5
-                while (not l3 or not l8 or #R < #U - 1) and timeout2 > 0 do
-                    task.wait(0.5); timeout2 = timeout2 - 1
-                end
-                
-                hookActive = false
-
-                if not l3 then
-                    print("-- Descargando Capa 3...")
-                    local direct, errDirect = safeHttpGet(U[1])
-                    if direct then l3 = direct else error("Error Capa 3.") end
-                end
-
-                for i = 2, #U do
-                    if not R[i] then
-                        local direct = safeHttpGet(U[i])
-                        if direct then R[i] = direct end
-                        task.wait(0.1)
-                    end
-                end
-                
-                local compactR = {}
-                for i = 2, #U do
-                    if R[i] then table.insert(compactR, R[i]) end
-                end
-                R = compactR
-
-                if not l8 then
-                    print("-- Descargando llaves...")
-                    local sum = SEED2
-                    for _, fr in ipairs(R) do
-                        for j = 1, #fr do sum = (sum + fr:byte(j)) % 1000000007 end
-                    end
-                    local finalKURL = KURL .. "?v=" .. sum
-                    local direct = safeHttpGet(finalKURL)
-                    if direct then l8 = direct else error("Error llaves.") end
-                end
-
-                print("-- URLs: " .. #U .. ". Procesando...")
-
-                local keyFunc = loadstring(l8)
-                if not keyFunc then error("Error llaves.") end
-                local okKey, KBF, K2F = pcall(keyFunc)
-                if not okKey or type(KBF) ~= "table" or type(K2F) ~= "table" then error("Error llaves.") end
-
-                local K = {}
-                for i = 1, 8 do K[i] = KA[i] end
-                for i = 1, 8 do K[8 + i] = KBF[i] end
-
-                print("-- Descifrando...")
-                local decryptor = loadstring(l3)
-                if not decryptor then error("Error descifrador.") end
-                
-                local decryptFn = decryptor()
-                if type(decryptFn) ~= "function" then error("Error descifrador.") end
-                
-                local finalCode = decryptFn(K, K2F, R)
-
-                if writefile then
+        getgenv().loadstring = function(code, chunkname)
+            if type(code) == "string" then
+                -- Verificamos que sea un código grande (la carga útil final) y no la capa de protección
+                if #code > 500 and not code:find("local KA%s*=%s*{") and not code:find("V3nt v3") then
                     local outPath = DIR .. "/V3nt_FINAL.lua"
-                    writefile(outPath, finalCode)
-                    print("-- ¡DESCIFRADO V2 COMPLETADO! | " .. formatSize(#finalCode))
-                else
-                    error("No writefile.")
-                end
-                success = true
-            end)
-
-            if not success then
-                if attempt == 1 and tostring(errTop):find("Capa 3") then
-                    print("-- Reintentando sin cache...")
-                    useCache = false
-                    local parsedHost = url and (url:match("^%a+://([^/%?#:]+)") or "desconocido") or "desconocido"
-                    local l2Path = EXTRACT_DIR .. "/" .. parsedHost:lower() .. "/layer2.lua"
-                    if isfile and isfile(l2Path) then pcall(delfile, l2Path) end
-                    task.wait(1)
-                else
-                    print("-- Error V2: " .. tostring(errTop))
-                    break
+                    if writefile then 
+                        pcall(writefile, outPath, code) 
+                        print("-- ¡CÓDIGO FINAL EXTRAÍDO! | " .. formatSize(#code))
+                        captured = true
+                    end
                 end
             end
-            attempt = attempt + 1
+            return oldLoadstring(code, chunkname)
+        end
+
+        local src = safeHttpGet(url)
+        if src then
+            print("-- Ejecutando loader principal...")
+            local fn = oldLoadstring(src)
+            if fn then pcall(fn) end
+        else
+            print("-- Error al descargar loader inicial")
+        end
+
+        -- Damos un margen de tiempo para que el script original termine de descargar y descifrar
+        task.wait(2)
+        getgenv().loadstring = oldLoadstring
+
+        if not captured then
+            print("-- Error: No se pudo capturar el código final.")
         end
     end)
-end
-
-local function execSquareWeb(input)
-    local url = extractURL(input)
-    if not url then 
-        print("-- Error: URL invalido")
-        return 
-    end
-
-    print("-- SquareWeb detectado. Analizando...")
-    
-    if url:find("webproxy.squareweb.app", 1, true) then
-        print("-- Firma V1 (Proxy) encontrada")
-        execSquareWebV1(input)
-        return
-    end
-
-    local sample = safeHttpGet(url)
-    
-    if not sample then
-        print("-- Sin muestra. Asumiendo V2 por defecto...")
-        execSquareWebV2(url, input)
-        return
-    end
-
-    -- NUEVA VALIDACION: Buscamos las firmas reales de la capa 1 de V2
-    if sample:find("V3nt", 1, true) or sample:find("LG_DEBUG", 1, true) or sample:find("__LG_BYPASS", 1, true) or sample:find("KURL", 1, true) or sample:find("SEED2", 1, true) then
-        print("-- Firma V2/V3nt encontrada en Layer 1")
-        execSquareWebV2(url, input)
-    else
-        print("-- Firma V1 encontrada")
-        execSquareWebV1(input)
-    end
 end
 
 return execSquareWeb
